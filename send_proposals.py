@@ -37,6 +37,8 @@ import time
 
 import requests
 
+import db_storage
+
 WHAPI_ENDPOINT = "https://gate.whapi.cloud/messages/text"
 
 
@@ -83,7 +85,10 @@ def run(in_csv: str, token: str, min_delay: float, max_delay: float,
     with open(in_csv, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
-    already_sent = load_already_sent(log_path)
+    # Cross-run/cross-day dedup lives in Postgres, not the local log file —
+    # see db_storage.contacted_leads for why (ephemeral cron filesystem).
+    db_storage.init_db()
+    already_sent = db_storage.load_all_contacted_phones()
     log_exists = os.path.exists(log_path)
     log_file = open(log_path, "a", newline="", encoding="utf-8")
     log_writer = csv.DictWriter(log_file, fieldnames=["name", "phone", "status", "detail"])
@@ -117,6 +122,7 @@ def run(in_csv: str, token: str, min_delay: float, max_delay: float,
         if ok:
             print(f"  [{i}/{len(rows)}] {name:40s} -> sent to {to}")
             log_writer.writerow({"name": name, "phone": to, "status": "sent", "detail": detail})
+            db_storage.mark_contacted(to, name, detail)
             sent += 1
         else:
             print(f"  [{i}/{len(rows)}] {name:40s} -> FAILED: {detail}", file=sys.stderr)

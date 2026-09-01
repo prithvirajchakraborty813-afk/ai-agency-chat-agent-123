@@ -101,6 +101,14 @@ def init_db() -> None:
                 received_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS contacted_leads (
+                phone TEXT PRIMARY KEY,
+                name TEXT,
+                detail TEXT,
+                first_sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
 
 
 # ---------------------------------------------------------------------------
@@ -183,4 +191,37 @@ def append_log_entry(entry: dict) -> None:
         cur.execute(
             "INSERT INTO incoming_log (entry) VALUES (%s)",
             (json.dumps(entry),),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Contacted leads — cross-run, cross-day record of every phone number ever
+# first-messaged by send_proposals.py. WHY THIS EXISTS: Render's Cron Job
+# filesystem is ephemeral — a fresh container on every scheduled run, so a
+# local sent_log.csv would reset to empty every single day and the pipeline
+# would re-message the same businesses daily. This table is the permanent,
+# cross-run source of truth send_proposals.py checks instead.
+# ---------------------------------------------------------------------------
+
+def load_all_contacted_phones() -> set:
+    with _cursor() as cur:
+        cur.execute("SELECT phone FROM contacted_leads")
+        return {row["phone"] for row in cur.fetchall()}
+
+
+def is_contacted(phone: str) -> bool:
+    with _cursor() as cur:
+        cur.execute("SELECT 1 FROM contacted_leads WHERE phone = %s", (phone,))
+        return cur.fetchone() is not None
+
+
+def mark_contacted(phone: str, name: str = "", detail: str = "") -> None:
+    with _cursor(commit=True) as cur:
+        cur.execute(
+            """
+            INSERT INTO contacted_leads (phone, name, detail)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (phone) DO NOTHING
+            """,
+            (phone, name, detail),
         )
