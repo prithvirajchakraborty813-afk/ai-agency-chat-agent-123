@@ -522,7 +522,7 @@ CHAT_RESPONSE_SCHEMA = {
             "description": "What to send back to the lead now. Empty string if ready_to_propose is true and nothing should be sent to the lead yet.",
         },
         "ready_to_propose": {"type": "BOOLEAN"},
-        "recommended_tier": {"type": "STRING", "description": "starter, growth, or custom — only meaningful if ready_to_propose is true"},
+        "recommended_tier": {"type": "STRING", "description": "starter or growth — only meaningful if ready_to_propose is true"},
         "owner_summary": {
             "type": "STRING",
             "description": "Summary for the business owner to review, only meaningful if ready_to_propose is true: what the customer wants, recommended tier, and why.",
@@ -785,6 +785,9 @@ def build_catalog_message(tiers: dict) -> str:
     for i, (key, tier) in enumerate(tiers.items(), start=1):
         fixed = tier.get("setup_price_fixed")
         price_line = f"₹{fixed:,} one-time setup" if fixed is not None else tier.get("setup_price", "Quote-based")
+        monthly_line = tier.get("monthly_price", "")
+        if monthly_line:
+            price_line = f"{price_line} + {monthly_line}"
         lines.append(f"{i}. *{tier['label']}* — {price_line}\n   {tier['description']}\n")
     lines.append('Reply with the number or name of the one you\'d like (e.g. "2" or "Growth").')
     return "\n".join(lines)
@@ -834,7 +837,7 @@ def handle_lead_message(phone: str, text: str) -> None:
         picked = match_selected_tier(text, tiers)
         if picked is None:
             reply = ('Didn\'t catch which one — reply with the number '
-                      '(1, 2, or 3) or the plan name (Starter, Growth, or Custom).')
+                      '(1 or 2) or the plan name (Starter or Growth).')
             send_whatsapp(phone, reply)
             append_history(phone, "agent", reply)
             return
