@@ -1,0 +1,5 @@
+{
+  "employee_min": 2,
+  "employee_max": 50,
+  "max_results": 50
+}
