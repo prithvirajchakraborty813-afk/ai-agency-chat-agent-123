@@ -122,6 +122,7 @@ def main() -> None:
         sys.executable, "gemini_vertex_qualifier.py",
         "--in", "prospects_merged.csv", "--out", "qualified.csv",
         "--project", project, "--product", product, "--pitch", pitch,
+        "--delay", os.environ.get("QUALIFY_DELAY", "4"),
     ]
     if not run_step("Qualify leads", qualify_cmd):
         sys.exit(1)
@@ -129,7 +130,7 @@ def main() -> None:
     proposal_cmd = [
         sys.executable, "proposal_generator.py",
         "--in", "qualified.csv", "--out", "proposals.csv",
-        "--project", project,
+        "--project", project, "--delay", os.environ.get("PROPOSAL_DELAY", "4"),
     ]
     if not run_step("Draft proposals", proposal_cmd):
         sys.exit(1)

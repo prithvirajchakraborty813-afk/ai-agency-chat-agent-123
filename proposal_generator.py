@@ -347,7 +347,7 @@ def main() -> None:
     parser.add_argument("--tiers", default="tiers_agency.json", help="Path to the pricing tiers config")
     parser.add_argument("--project", required=True, help="Google Cloud project ID")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Gemini model id")
-    parser.add_argument("--delay", type=float, default=1.5,
+    parser.add_argument("--delay", type=float, default=4.0,
                          help="Seconds to wait between requests (raise this if you keep hitting 429s)")
     args = parser.parse_args()
 
