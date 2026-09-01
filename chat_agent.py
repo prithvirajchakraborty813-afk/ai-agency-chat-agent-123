@@ -71,6 +71,25 @@ import order_contract
 import db_storage
 
 # ---------------------------------------------------------------------------
+# Vertex AI auth on Render — Render has no gcloud CLI and no attached
+# service account (unlike Cloud Run), so google.auth.default() finds
+# nothing by default. The org's policy blocking service-account KEY
+# creation does NOT block the ADC file gcloud already generated locally
+# (it's a refresh-token "authorized_user" credential, not a service
+# account key) — so we just hand that same file to Render as a secret
+# env var and write it to disk before any Gemini call happens. This must
+# run before google.auth.default() is ever called, so it lives at import
+# time, above everything else that might trigger it.
+# ---------------------------------------------------------------------------
+_ADC_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "")
+if _ADC_JSON and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+    _adc_path = "/tmp/adc.json"
+    with open(_adc_path, "w", encoding="utf-8") as _f:
+        _f.write(_ADC_JSON)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _adc_path
+    print("[info] Wrote ADC credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON to /tmp/adc.json")
+
+# ---------------------------------------------------------------------------
 # Configuration — same pattern as send_proposals.py / gemini_vertex_qualifier.py
 # ---------------------------------------------------------------------------
 
@@ -116,6 +135,8 @@ def _startup_checks() -> None:
         print("[warning] WHAPI_TOKEN is not set — sending will fail until you export it.")
     if not GCP_PROJECT:
         print("[warning] GCP_PROJECT is not set — Gemini calls will fail until you export it.")
+    if not _ADC_JSON and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        print("[warning] GOOGLE_APPLICATION_CREDENTIALS_JSON is not set — Gemini/Vertex AI calls will fail with an ADC error until you export it (see the paste-your-local-ADC-file instructions).")
     if not OWNER_UPI_ID:
         print("[warning] OWNER_UPI_ID is not set — contract messages will have a broken payment link until you export it.")
     if not db_storage.DATABASE_URL:
