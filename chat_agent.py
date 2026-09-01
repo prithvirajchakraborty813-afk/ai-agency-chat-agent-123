@@ -778,9 +778,8 @@ def load_tiers() -> dict:
 
 
 def build_catalog_message(tiers: dict) -> str:
-    """Fixed-price catalog shown to the lead after warm-up chat. Uses
-    setup_price_fixed where available (Starter/Growth); Custom stays
-    quote-based since it can't be a clickable fixed price by design."""
+    """Fixed-price catalog shown to the lead after warm-up chat. Both
+    tiers (Starter/Growth) carry a fixed setup_price_fixed value."""
     lines = ["Here's what we offer — pick the one that fits:\n"]
     for i, (key, tier) in enumerate(tiers.items(), start=1):
         fixed = tier.get("setup_price_fixed")
@@ -798,7 +797,7 @@ def build_catalog_message(tiers: dict) -> str:
 # would misquote a price to the customer.
 def match_selected_tier(text: str, tiers: dict) -> Optional[str]:
     lowered = text.strip().lower()
-    tier_keys = list(tiers.keys())  # preserves JSON order: starter, growth, custom
+    tier_keys = list(tiers.keys())  # preserves JSON order: starter, growth
     # Numeric pick ("1", "2.", "option 3")
     for i, key in enumerate(tier_keys, start=1):
         if lowered == str(i) or lowered.startswith(f"{i}.") or lowered.startswith(f"{i})"):
@@ -836,11 +835,8 @@ def handle_lead_message(phone: str, text: str) -> None:
     elif stage == "catalog_shown":
         picked = match_selected_tier(text, tiers)
         if picked is None:
-            tier_labels = [t["label"] for t in tiers.values()]
-            numbers = "/".join(str(i) for i in range(1, len(tier_labels) + 1))
-            names = ", ".join(tier_labels)
-            reply = (f"Didn't catch which one — reply with the number "
-                      f"({numbers}) or the plan name ({names}).")
+            reply = ('Didn\'t catch which one — reply with the number '
+                      '(1 or 2) or the plan name (Starter or Growth).')
             send_whatsapp(phone, reply)
             append_history(phone, "agent", reply)
             return
@@ -871,7 +867,7 @@ def handle_lead_message(phone: str, text: str) -> None:
             fixed_price = convo.get("fixed_price")
             price_line = (f"Fixed price already selected: ₹{fixed_price:,}"
                            if fixed_price is not None
-                           else "Custom tier — no fixed price, needs your quote.")
+                           else "No fixed price on record — needs your quote.")
             send_whatsapp(
                 OWNER_PHONE,
                 f"📋 Ready to propose — lead {phone}\n\n"
@@ -980,10 +976,11 @@ def handle_owner_message(text: str) -> None:
         deliberate: fixing prices in the catalog removed the need for a
         separate price-locking round-trip, since there's no range left for
         a human to pick a number from.
-      - "SETPRICE <lead_phone> <amount>" — fallback path, only reachable
-        for the Custom tier, which has no fixed catalog price and is
-        explicitly quote-based/scoped-per-client by design. Also sends
-        immediately once the owner names a number.
+      - "SETPRICE <lead_phone> <amount>" — fallback path for the rare
+        case where a lead's selected tier has no fixed price on record
+        (e.g. a malformed/edited tiers file). Not expected in normal
+        operation since every catalog tier now carries a fixed price.
+        Sends immediately once the owner names a number.
     Anything else from the owner is logged but not acted on — this
     deliberately does NOT try to guess intent from free-form text, since a
     wrong guess here could send a customer an unapproved offer.
@@ -1004,9 +1001,8 @@ def handle_owner_message(text: str) -> None:
         fixed_price = convo.get("fixed_price")
 
         if fixed_price is None:
-            # Custom tier (or otherwise no fixed price on record) — can't
-            # auto-charge without a number. Ask for it via SETPRICE instead
-            # of guessing.
+            # No fixed price on record — can't auto-charge without a
+            # number. Ask for it via SETPRICE instead of guessing.
             send_whatsapp(
                 OWNER_PHONE,
                 f"{tier_info.get('label', tier_key)} has no fixed price on record for "

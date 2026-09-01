@@ -14,10 +14,5 @@
     "monthly_price": "\u20b99,999/month",
     "monthly_price_fixed": 9999,
     "description": "Multi-channel (WhatsApp + website + email). Lead capture feeding a simple CRM/sheet, monthly usage reporting. Best fit: businesses with meaningful inquiry volume, or a small handful of locations."
-  },
-  "custom": {
-    "label": "Custom",
-    "setup_price": "Quote-based",
-    "description": "For complex leads: multi-location franchises, or manufacturers/retailers needing inventory- or production-adjacent automation. Scope and price set case by case, not pre-fixed."
   }
 }
