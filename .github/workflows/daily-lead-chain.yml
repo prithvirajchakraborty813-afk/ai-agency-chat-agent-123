@@ -1,0 +1,40 @@
+name: Daily Lead Chain
+
+on:
+  schedule:
+    # Cron times are UTC. IST is UTC+5:30. Example: 20:30 IST = 15:00 UTC.
+    # Adjust the line below to your actual fixed time, then convert to UTC.
+    - cron: "0 15 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab too
+
+jobs:
+  run-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google ADC credentials
+        run: echo "$GOOGLE_ADC_JSON" > "$HOME/adc.json"
+        env:
+          GOOGLE_ADC_JSON: ${{ secrets.GOOGLE_ADC_JSON }}
+
+      - name: Run daily chain
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /home/runner/adc.json
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          LEAD_DESCRIPTION: ${{ secrets.LEAD_DESCRIPTION }}
+          LEAD_CITIES: ${{ secrets.LEAD_CITIES }}
+          COUNT_PER_CITY: ${{ secrets.COUNT_PER_CITY }}
+          PRODUCT_NAME: ${{ secrets.PRODUCT_NAME }}
+          PRODUCT_PITCH: ${{ secrets.PRODUCT_PITCH }}
+          WHAPI_TOKEN: ${{ secrets.WHAPI_TOKEN }}
+          OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python run_daily_chain.py
