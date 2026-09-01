@@ -836,8 +836,11 @@ def handle_lead_message(phone: str, text: str) -> None:
     elif stage == "catalog_shown":
         picked = match_selected_tier(text, tiers)
         if picked is None:
-            reply = ('Didn\'t catch which one — reply with the number '
-                      '(1 or 2) or the plan name (Starter or Growth).')
+            tier_labels = [t["label"] for t in tiers.values()]
+            numbers = "/".join(str(i) for i in range(1, len(tier_labels) + 1))
+            names = ", ".join(tier_labels)
+            reply = (f"Didn't catch which one — reply with the number "
+                      f"({numbers}) or the plan name ({names}).")
             send_whatsapp(phone, reply)
             append_history(phone, "agent", reply)
             return
