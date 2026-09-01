@@ -778,8 +778,10 @@ def load_tiers() -> dict:
 
 
 def build_catalog_message(tiers: dict) -> str:
-    """Fixed-price catalog shown to the lead after warm-up chat. Both
-    tiers (Starter/Growth) carry a fixed setup_price_fixed value."""
+    """Fixed-price catalog shown to the lead after warm-up chat. All tiers
+    carry a fixed setup_price_fixed value. Not every tier has a recurring
+    monthly_price (e.g. Website is one-time only) — that's fine, it's
+    simply omitted from the price line when absent/empty."""
     lines = ["Here's what we offer — pick the one that fits:\n"]
     for i, (key, tier) in enumerate(tiers.items(), start=1):
         fixed = tier.get("setup_price_fixed")
@@ -835,8 +837,10 @@ def handle_lead_message(phone: str, text: str) -> None:
     elif stage == "catalog_shown":
         picked = match_selected_tier(text, tiers)
         if picked is None:
-            reply = ('Didn\'t catch which one — reply with the number '
-                      '(1 or 2) or the plan name (Starter or Growth).')
+            tier_labels = [t["label"] for t in tiers.values()]
+            number_range = f"1-{len(tier_labels)}" if len(tier_labels) > 1 else "1"
+            reply = (f"Didn't catch which one — reply with the number "
+                      f"({number_range}) or the plan name ({', '.join(tier_labels)}).")
             send_whatsapp(phone, reply)
             append_history(phone, "agent", reply)
             return
