@@ -196,7 +196,7 @@ Company to evaluate:
 
 
 def run(in_csv: str, out_csv: str, product: str, pitch: str, project: str,
-        model: str = DEFAULT_MODEL) -> list[QualificationResult]:
+        model: str = DEFAULT_MODEL, delay: float = 4.0) -> list[QualificationResult]:
     client = VertexGeminiClient(project=project, model=model)
     results: list[QualificationResult] = []
 
@@ -212,7 +212,7 @@ def run(in_csv: str, out_csv: str, product: str, pitch: str, project: str,
             print(f"  [{i}/{len(rows)}] {result.name:30s} {status} (conf {result.confidence:.2f})")
         except Exception as e:
             print(f"  [{i}/{len(rows)}] {row.get('name', '?')} FAILED: {e}", file=sys.stderr)
-        time.sleep(0.3)  # be a reasonable citizen re: Vertex AI rate limits
+        time.sleep(delay)  # be a reasonable citizen re: Vertex AI rate limits
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -233,9 +233,11 @@ def main() -> None:
     parser.add_argument("--product", required=True, help="Your product/app name")
     parser.add_argument("--pitch", required=True, help="One-line description of what it does / solves")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Gemini model id")
+    parser.add_argument("--delay", type=float, default=4.0,
+                         help="Seconds to wait between Vertex AI calls (default 4.0, to avoid 429 rate limits)")
     args = parser.parse_args()
 
-    results = run(args.in_csv, args.out_csv, args.product, args.pitch, args.project, args.model)
+    results = run(args.in_csv, args.out_csv, args.product, args.pitch, args.project, args.model, args.delay)
     qualified_count = sum(1 for r in results if r.qualified)
     print(f"\nDone. {qualified_count}/{len(results)} qualified. Wrote {args.out_csv}")
 

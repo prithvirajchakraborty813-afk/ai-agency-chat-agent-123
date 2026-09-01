@@ -222,7 +222,29 @@ class VertexGeminiClient:
             "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048},
         }
         data = self._post(payload)
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        candidates = data.get("candidates") or []
+        if not candidates:
+            print(f"  [warn] Gemini returned no candidates. Full response: {data}", file=sys.stderr)
+            return ""
+        candidate = candidates[0]
+        finish_reason = candidate.get("finishReason", "UNKNOWN")
+        parts = candidate.get("content", {}).get("parts") or []
+        if not parts:
+            print(
+                f"  [warn] Gemini candidate had no 'parts' (finishReason={finish_reason}). "
+                f"Full candidate: {candidate}",
+                file=sys.stderr,
+            )
+            return ""
+        # Concatenate all text parts, in case the grounded response is split
+        # across multiple parts (e.g. text interleaved with search metadata).
+        text = "".join(p.get("text", "") for p in parts)
+        if not text.strip():
+            print(
+                f"  [warn] Gemini candidate had parts but no usable text (finishReason={finish_reason}).",
+                file=sys.stderr,
+            )
+        return text
 
     def extract_companies(self, search_text: str) -> list[FoundCompany]:
         """Non-grounded call: reshapes the free-text search summary into
@@ -311,10 +333,20 @@ def run(out_csv: str, project: str, description: str, count: int, model: str = D
 
     print(f"Searching the web for: {description}")
     search_text = client.search_for_companies(description, count)
-    print(f"  [debug] Raw search text ({len(search_text)} chars):\n{search_text[:2000]}\n", file=sys.stderr)
-    print("  [debug] Extracting structured data from the above...", file=sys.stderr)
 
-    companies = client.extract_companies(search_text)
+    if not search_text.strip():
+        print(
+            "  [warn] Search grounding returned no usable text this run "
+            "(see warnings above). Writing an empty result file instead of "
+            "crashing the chain — the Maps finder's results can still be used.",
+            file=sys.stderr,
+        )
+        companies: list[FoundCompany] = []
+    else:
+        print(f"  [debug] Raw search text ({len(search_text)} chars):\n{search_text[:2000]}\n", file=sys.stderr)
+        print("  [debug] Extracting structured data from the above...", file=sys.stderr)
+        companies = client.extract_companies(search_text)
+
     print(f"Found {len(companies)} companies.")
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
