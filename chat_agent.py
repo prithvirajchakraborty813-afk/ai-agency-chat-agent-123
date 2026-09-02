@@ -72,6 +72,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -1399,44 +1400,59 @@ def poll_email():
     print(f"[info] /poll-email: {len(replies)} new email reply(ies) found.")
 
     processed = 0
+    errors = 0
     for sender_addr, domain, body in replies:
-        append_to_log({
-            "received_at": datetime.now(timezone.utc).isoformat(),
-            "raw_payload": {"channel": "email", "from": sender_addr, "domain": domain, "body": body},
-        })
+        try:
+            append_to_log({
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "raw_payload": {"channel": "email", "from": sender_addr, "domain": domain, "body": body},
+            })
 
-        # If OWNER_EMAIL replied, this is the owner sending APPROVE/SETPRICE
-        # by email (see OWNER_NOTIFY_CHANNEL) — route to the owner-command
-        # handler, not the lead-chat engine. Case-insensitive since email
-        # addresses are compared case-insensitively by convention.
-        if OWNER_EMAIL and sender_addr.strip().lower() == OWNER_EMAIL.strip().lower():
-            handle_owner_message(body)
+            # If OWNER_EMAIL replied, this is the owner sending APPROVE/SETPRICE
+            # by email (see OWNER_NOTIFY_CHANNEL) — route to the owner-command
+            # handler, not the lead-chat engine. Case-insensitive since email
+            # addresses are compared case-insensitively by convention.
+            if OWNER_EMAIL and sender_addr.strip().lower() == OWNER_EMAIL.strip().lower():
+                handle_owner_message(body)
+                processed += 1
+                continue
+
+            convo_id = f"email:{domain}"
+            # Matches a reply back to its lead by DOMAIN, not the exact sender
+            # address — same limitation as the original send: this pipeline
+            # never captured a real per-lead email, only a guessed info@/
+            # contact@ address, so "someone at this domain replied" is the
+            # best available match. If two different people at the same
+            # domain email in, they share one conversation — an accepted
+            # tradeoff given the alternative is no email channel at all.
+            get_or_create_conversation(convo_id, email_address=sender_addr)
+
+            convo = get_or_create_conversation(convo_id)
+            stage = convo.get("stage", "warming_up")
+            if detect_escalation_request(body) and stage in ("awaiting_owner_approval", "awaiting_payment"):
+                append_history(convo_id, "lead", body)
+                handle_post_lock_message(convo_id, body, stage)
+            elif detect_escalation_request(body):
+                append_history(convo_id, "lead", body)
+                handle_escalation(convo_id, body)
+            else:
+                handle_lead_message(convo_id, body)
             processed += 1
-            continue
+        except Exception as e:
+            # One bad reply (Gemini hiccup, malformed body, etc.) used to
+            # crash the whole batch as an unhandled 500 with no info in
+            # the caller's log. Now it's logged with a full traceback in
+            # Render's own logs and the loop moves on to the next reply.
+            errors += 1
+            print(f"[error] /poll-email: failed processing reply from {sender_addr!r}: {e}", file=sys.stderr)
+            traceback.print_exc()
 
-        convo_id = f"email:{domain}"
-        # Matches a reply back to its lead by DOMAIN, not the exact sender
-        # address — same limitation as the original send: this pipeline
-        # never captured a real per-lead email, only a guessed info@/
-        # contact@ address, so "someone at this domain replied" is the
-        # best available match. If two different people at the same
-        # domain email in, they share one conversation — an accepted
-        # tradeoff given the alternative is no email channel at all.
-        get_or_create_conversation(convo_id, email_address=sender_addr)
-
-        convo = get_or_create_conversation(convo_id)
-        stage = convo.get("stage", "warming_up")
-        if detect_escalation_request(body) and stage in ("awaiting_owner_approval", "awaiting_payment"):
-            append_history(convo_id, "lead", body)
-            handle_post_lock_message(convo_id, body, stage)
-        elif detect_escalation_request(body):
-            append_history(convo_id, "lead", body)
-            handle_escalation(convo_id, body)
-        else:
-            handle_lead_message(convo_id, body)
-        processed += 1
-
-    return jsonify({"status": "ok", "replies_found": len(replies), "processed": processed}), 200
+    return jsonify({
+        "status": "ok",
+        "replies_found": len(replies),
+        "processed": processed,
+        "errors": errors,
+    }), 200
 
 
 @app.route("/", methods=["GET"])

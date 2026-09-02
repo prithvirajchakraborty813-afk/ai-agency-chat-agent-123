@@ -229,6 +229,22 @@ def fetch_new_replies(gmail_address: str, gmail_app_password: str,
                 if not sender_addr or "@" not in sender_addr:
                     continue
                 domain = sender_addr.split("@", 1)[1]
+
+                # Skip obvious automated/notification senders (newsletters,
+                # no-reply addresses from other services, etc). Without this,
+                # something like a YouTube notification landing as UNSEEN in
+                # the inbox gets treated as a real lead reply, and the chat
+                # engine tries to "negotiate" with it and email a reply back
+                # to an address that will never accept mail — which can hang
+                # the whole request until the server's worker timeout kills
+                # it (this exact failure mode happened with
+                # noreply@youtube.com and produced a bare, unexplained 500).
+                local_part = sender_addr.split("@", 1)[0]
+                if local_part in ("noreply", "no-reply", "donotreply", "do-not-reply", "notifications", "mailer-daemon"):
+                    print(f"[info] Skipping likely-automated sender: {sender_addr}", file=sys.stderr)
+                    imap.store(msg_id, "+FLAGS", "\\Seen")
+                    continue
+
                 body = _extract_body(msg)
                 body = _strip_quoted_reply(body)
                 if body:
