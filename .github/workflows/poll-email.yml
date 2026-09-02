@@ -1,0 +1,39 @@
+name: Poll Email Replies
+
+# Split out from daily-lead-chain.yml on purpose: this workflow ONLY hits
+# the deployed chat_agent.py service's /poll-email route (Render) — it
+# does NOT run lead-finding, does NOT send any WhatsApp messages, and
+# does NOT depend on the daily chain running first or succeeding.
+#
+# Why this matters for testing: before this split, checking whether an
+# email reply got picked up meant running the *whole* daily chain
+# (lead-finding + WhatsApp sends), which is wasteful and, while the
+# WhatsApp number is still recovering from the earlier volume
+# restriction, actively risky. This workflow is safe to re-run as many
+# times as you want while testing the email loop.
+
+on:
+  schedule:
+    # Runs on its own schedule, independent of the daily lead chain.
+    # Cron times are UTC. Example below: every 3 hours. Adjust as needed —
+    # email doesn't need WhatsApp's near-real-time responsiveness, so this
+    # can run far less often than "continuously."
+    - cron: "0 */3 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab — use this to test
+
+jobs:
+  poll-email:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poll Gmail for lead/owner replies
+        # Hits the deployed chat_agent.py service (Render), not this
+        # runner — the polling logic and Gemini conversation engine both
+        # live there. RENDER_APP_URL is just the base URL of that service,
+        # e.g. https://your-service.onrender.com — no trailing slash.
+        env:
+          RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
+          POLL_EMAIL_SECRET: ${{ secrets.POLL_EMAIL_SECRET }}
+        run: |
+          curl -sf -X POST "$RENDER_APP_URL/poll-email" \
+            -H "X-Poll-Secret: $POLL_EMAIL_SECRET" \
+            --max-time 60

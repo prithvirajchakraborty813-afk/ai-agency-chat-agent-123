@@ -124,6 +124,13 @@ OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")  # where owner alerts go if OWNE
 OWNER_NOTIFY_CHANNEL = os.environ.get("OWNER_NOTIFY_CHANNEL", "whatsapp").strip().lower()
 POLL_EMAIL_SECRET = os.environ.get("POLL_EMAIL_SECRET", "")  # shared secret so /poll-email can't be hit by randoms
 EMAIL_REPLY_SUBJECT = "Re: your message"
+# Base URL of this very service on Render, e.g. https://ai-agency-chat-agent-123.onrender.com
+# (no trailing slash) — same value already used as a GitHub Actions secret for
+# /poll-email, just also set here as a Render env var so this app can build a
+# link back to itself for the /pay/<order_id> fallback page. Not required for
+# anything else, so a missing value only degrades the payment-page link, it
+# never blocks WhatsApp/email sending.
+RENDER_APP_URL = os.environ.get("RENDER_APP_URL", "").rstrip("/")
 
 
 def _to_chat_id(digits_only_phone: str) -> str:
@@ -186,6 +193,8 @@ def _startup_checks() -> None:
         print("[warning] GOOGLE_APPLICATION_CREDENTIALS_JSON is not set — Gemini/Vertex AI calls will fail with an ADC error until you export it (see the paste-your-local-ADC-file instructions).")
     if not OWNER_UPI_ID:
         print("[warning] OWNER_UPI_ID is not set — contract messages will have a broken payment link until you export it.")
+    if not RENDER_APP_URL:
+        print("[warning] RENDER_APP_URL is not set — contract messages will skip the /pay/<order_id> fallback link until you export it (should be this service's own Render URL, e.g. https://ai-agency-chat-agent-123.onrender.com).")
     if not db_storage.DATABASE_URL:
         print("[warning] DATABASE_URL is not set — conversation/order state cannot be saved until you export it (see console.neon.tech or Render's Postgres add-on).")
     else:
@@ -1068,6 +1077,18 @@ def _send_contract_and_qr(lead_phone: str, order: dict, contract_msg: str) -> No
         print(f"[warn] Could not send payment QR to {lead_phone}: {e}", file=sys.stderr)
 
 
+def _build_pay_page_url(order_id: str) -> Optional[str]:
+    """Link to this same service's /pay/<order_id> fallback page — a plain
+    web page (no WhatsApp/UPI-app handoff required) showing the QR, the
+    upi:// link, and the raw UPI ID, for cases where the deep link fails to
+    open and/or the customer isn't on a phone at all (desktop, QR rendered
+    poorly in-chat, etc). Returns None if RENDER_APP_URL isn't set, so
+    callers can skip the line entirely rather than send a broken link."""
+    if not RENDER_APP_URL:
+        return None
+    return f"{RENDER_APP_URL}/pay/{order_id}"
+
+
 def _create_and_send_contract(lead_phone: str, convo: dict, tier_info: dict,
                                tier_key: str, amount: int) -> None:
     """Shared by both approval paths below: lock the order, send the
@@ -1083,6 +1104,16 @@ def _create_and_send_contract(lead_phone: str, convo: dict, tier_info: dict,
         upi_id=OWNER_UPI_ID,
     )
     contract_msg = order_contract.build_contract_message(order)
+    pay_page_url = _build_pay_page_url(order["order_id"])
+    if pay_page_url:
+        # Third fallback option, not a replacement for the upi:// link or
+        # the QR image — some phones fail the app handoff from inside
+        # WhatsApp/email but succeed from a real browser tab, and this is
+        # the only option at all for anyone on desktop.
+        contract_msg += (
+            f"\n\nHaving trouble with the link or QR above? Open this page "
+            f"instead: {pay_page_url}"
+        )
     _send_contract_and_qr(lead_phone, order, contract_msg)
     set_stage(lead_phone, "awaiting_payment", pending_order_id=order["order_id"])
     send_whatsapp(OWNER_PHONE, f"Sent. Order {order['order_id']} — awaiting payment of ₹{order['amount_rupees']:,}.")
@@ -1159,6 +1190,116 @@ def handle_owner_message(text: str) -> None:
         return
 
     print(f"[info] Owner sent a message not recognized as a command: {text!r} — no action taken.")
+
+
+# ---------------------------------------------------------------------------
+# /pay/<order_id> — a plain web fallback for when the upi://pay?... deep
+# link fails to open inside WhatsApp's/email's in-app browsers (a known,
+# common mobile issue), or the customer is on desktop, or the QR image
+# rendered poorly in the chat client. Shows the exact same order/QR/UPI-ID
+# data _send_contract_and_qr() already sent — this is a third way to reach
+# it, not a new source of truth. No new domain, no templates/ folder: this
+# lives on the same Render service and renders one inline HTML string.
+# ---------------------------------------------------------------------------
+
+_PAY_PAGE_NOT_FOUND_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order not found</title>
+<style>
+  body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+         background: #f5f5f5; margin: 0; padding: 40px 20px; text-align: center; }}
+  .card {{ max-width: 420px; margin: 0 auto; background: #fff; border-radius: 12px;
+          padding: 32px 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }}
+  h1 {{ font-size: 18px; color: #222; margin: 0 0 8px; }}
+  p {{ color: #666; font-size: 14px; line-height: 1.5; }}
+</style></head>
+<body><div class="card">
+  <h1>Order not found</h1>
+  <p>We couldn't find an order matching <code>{order_id}</code>. Double-check the
+  link, or reply to your conversation and ask for it to be resent.</p>
+</div></body></html>"""
+
+_PAY_PAGE_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pay order {order_id}</title>
+<style>
+  body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+         background: #f5f5f5; margin: 0; padding: 32px 16px; }}
+  .card {{ max-width: 420px; margin: 0 auto; background: #fff; border-radius: 12px;
+          padding: 28px 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }}
+  h1 {{ font-size: 18px; color: #222; margin: 0 0 4px; }}
+  .sub {{ color: #888; font-size: 13px; margin: 0 0 20px; }}
+  .row {{ display: flex; justify-content: space-between; padding: 8px 0;
+         border-bottom: 1px solid #eee; font-size: 14px; }}
+  .row:last-of-type {{ border-bottom: none; }}
+  .row span:first-child {{ color: #666; }}
+  .row span:last-child {{ color: #222; font-weight: 600; text-align: right; }}
+  .qr-wrap {{ text-align: center; margin: 24px 0; }}
+  .qr-wrap img {{ width: 220px; height: 220px; border: 1px solid #eee; border-radius: 8px; }}
+  .qr-caption {{ color: #888; font-size: 12px; margin-top: 8px; }}
+  .pay-btn {{ display: block; text-align: center; background: #128C7E; color: #fff;
+             text-decoration: none; font-weight: 600; font-size: 15px;
+             padding: 14px; border-radius: 8px; margin: 20px 0 8px; }}
+  .upi-id {{ text-align: center; color: #666; font-size: 13px; margin: 4px 0 0; }}
+  .upi-id code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; }}
+  .note {{ color: #999; font-size: 12px; line-height: 1.5; margin-top: 24px;
+          padding-top: 16px; border-top: 1px solid #eee; }}
+</style></head>
+<body><div class="card">
+  <h1>Order {order_id}</h1>
+  <p class="sub">{tier_name}</p>
+
+  <div class="row"><span>Scope</span><span>{scope_summary}</span></div>
+  <div class="row"><span>Amount due</span><span>&#8377;{amount:,}</span></div>
+
+  {qr_block}
+
+  <a class="pay-btn" href="{upi_link}">Pay Now via UPI app</a>
+  <p class="upi-id">Or enter manually — UPI ID: <code>{upi_id}</code></p>
+
+  <p class="note">Please keep the order ID ({order_id}) in the payment note if
+  your UPI app allows it — this helps confirm your payment quickly. This is a
+  personal UPI ID, not a registered business account, so your UPI app may not
+  show a verified merchant badge — that's expected.</p>
+</div></body></html>"""
+
+
+@app.route("/pay/<order_id>", methods=["GET"])
+def pay_page(order_id: str):
+    order = order_contract.get_order(order_id)
+    if order is None:
+        return _PAY_PAGE_NOT_FOUND_HTML.format(order_id=order_id), 404
+
+    upi_link = order_contract.build_upi_link(order)
+
+    qr_block = ""
+    try:
+        import base64
+        qr_png = order_contract.build_upi_qr_png(order)
+        qr_b64 = base64.b64encode(qr_png).decode("ascii")
+        qr_block = (
+            '<div class="qr-wrap">'
+            f'<img src="data:image/png;base64,{qr_b64}" alt="UPI payment QR code">'
+            '<p class="qr-caption">Scan with any UPI app</p>'
+            '</div>'
+        )
+    except Exception as e:
+        # Same non-fatal handling as _send_contract_and_qr — the Pay Now
+        # button and raw UPI ID below still work without the QR image.
+        print(f"[warn] Could not render QR for /pay/{order_id}: {e}", file=sys.stderr)
+
+    html = _PAY_PAGE_HTML.format(
+        order_id=order["order_id"],
+        tier_name=order.get("tier_name", ""),
+        scope_summary=order.get("scope_summary", ""),
+        amount=order["amount_rupees"],
+        qr_block=qr_block,
+        upi_link=upi_link,
+        upi_id=order["upi_id"],
+    )
+    return html, 200
 
 
 # ---------------------------------------------------------------------------
