@@ -109,6 +109,13 @@ def init_db() -> None:
                 first_sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS processed_emails (
+                message_id TEXT PRIMARY KEY,
+                sender_addr TEXT,
+                processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
 
 
 # ---------------------------------------------------------------------------
@@ -224,4 +231,40 @@ def mark_contacted(phone: str, name: str = "", detail: str = "") -> None:
             ON CONFLICT (phone) DO NOTHING
             """,
             (phone, name, detail),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Processed emails — cross-run record of every inbound email Message-ID the
+# poll-email route has already handled. WHY THIS EXISTS: fetch_new_replies()
+# used to rely on Gmail's IMAP \Seen flag (searching UNSEEN) to know what's
+# new. That silently breaks whenever anything else touches the same inbox —
+# a phone opening the mail app, a second app also polling over IMAP, Gmail's
+# own preview/scanning — because \Seen is a shared, mutable flag with no
+# concept of "processed by this specific bot". A message marked Seen by
+# something else is invisible to a UNSEEN search forever, with no error.
+# Tracking Message-IDs (a stable, unique header every email has) here makes
+# "have I handled this" a fact this app owns, independent of what else
+# reads/opens mail in that inbox.
+# ---------------------------------------------------------------------------
+
+def is_email_processed(message_id: str) -> bool:
+    if not message_id:
+        return False
+    with _cursor() as cur:
+        cur.execute("SELECT 1 FROM processed_emails WHERE message_id = %s", (message_id,))
+        return cur.fetchone() is not None
+
+
+def mark_email_processed(message_id: str, sender_addr: str = "") -> None:
+    if not message_id:
+        return
+    with _cursor(commit=True) as cur:
+        cur.execute(
+            """
+            INSERT INTO processed_emails (message_id, sender_addr)
+            VALUES (%s, %s)
+            ON CONFLICT (message_id) DO NOTHING
+            """,
+            (message_id, sender_addr),
         )

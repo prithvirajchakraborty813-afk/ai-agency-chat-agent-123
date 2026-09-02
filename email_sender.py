@@ -56,6 +56,7 @@ import os
 import re
 import smtplib
 import sys
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.header import decode_header
 from email.utils import parseaddr
@@ -189,10 +190,23 @@ def _strip_quoted_reply(body: str) -> str:
 
 
 def fetch_new_replies(gmail_address: str, gmail_app_password: str,
-                       max_messages: int = 5) -> list[tuple[str, str, str]]:
-    """Connects over IMAP, finds UNSEEN messages in the inbox, and returns
-    them as (sender_email, sender_domain, body) tuples — marking each one
-    Seen as it's read, so a message is never returned twice across runs.
+                       max_messages: int = 5,
+                       lookback_days: int = 7) -> list[tuple[str, str, str]]:
+    """Connects over IMAP, finds recent messages in the inbox, and returns
+    the ones not yet processed as (sender_email, sender_domain, body)
+    tuples — recording each one's Message-ID in the DB (via db_storage) as
+    it's read, so a message is never returned twice across runs.
+
+    Deliberately does NOT rely on Gmail's \\Seen flag / UNSEEN search.
+    \\Seen is a shared, mutable flag — anything else that touches this
+    inbox (a phone's mail app opening a message, a second app also polling
+    over IMAP, Gmail's own preview) can silently mark a message Seen before
+    this poll ever runs, making it permanently invisible to a UNSEEN
+    search with zero error signal. Instead this searches SINCE a lookback
+    window (recent-but-not-huge) and filters against a DB table of
+    already-processed Message-IDs, which only this app writes to — so
+    "have I handled this" is a fact this app owns, not something another
+    process can quietly invalidate.
 
     sender_domain is the part after '@' in the sender's address, used to
     match a reply back to the lead it belongs to (leads are only known by
@@ -207,22 +221,45 @@ def fetch_new_replies(gmail_address: str, gmail_app_password: str,
         print("[error] GMAIL_ADDRESS / GMAIL_APP_PASSWORD not set — cannot poll for replies.", file=sys.stderr)
         return []
 
+    try:
+        import db_storage
+    except Exception as e:
+        print(f"[error] db_storage unavailable — cannot track processed emails safely: {e}", file=sys.stderr)
+        return []
+
     results: list[tuple[str, str, str]] = []
     try:
         with imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, GMAIL_IMAP_PORT) as imap:
             imap.login(gmail_address, gmail_app_password)
             imap.select("INBOX")
-            status, data = imap.search(None, "UNSEEN")
+            since_date = (datetime.utcnow() - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
+            status, data = imap.search(None, f'(SINCE "{since_date}")')
             if status != "OK":
                 print(f"[error] IMAP search failed: {status}", file=sys.stderr)
                 return []
-            msg_ids = data[0].split()[:max_messages]
+            # Newest first, so a burst of old backlog doesn't starve out
+            # today's replies when max_messages caps how many we take.
+            msg_ids = list(reversed(data[0].split()))
+            processed_count = 0
             for msg_id in msg_ids:
+                if processed_count >= max_messages:
+                    break
                 status, msg_data = imap.fetch(msg_id, "(RFC822)")
                 if status != "OK" or not msg_data or not msg_data[0]:
                     continue
                 raw = msg_data[0][1]
                 msg = email.message_from_bytes(raw)
+
+                message_id = (_decode_str(msg.get("Message-ID", "")) or "").strip()
+                if not message_id:
+                    # No Message-ID header at all is rare and slightly
+                    # suspicious (most legitimate mail servers always set
+                    # one) — skip rather than risk re-processing the same
+                    # mail every run with no way to dedupe it.
+                    continue
+                if db_storage.is_email_processed(message_id):
+                    continue
+
                 from_header = _decode_str(msg.get("From", ""))
                 _, sender_addr = parseaddr(from_header)
                 sender_addr = (sender_addr or "").strip().lower()
@@ -263,16 +300,18 @@ def fetch_new_replies(gmail_address: str, gmail_app_password: str,
                 )
                 if is_noreply_local or is_known_notification_domain:
                     print(f"[info] Skipping likely-automated sender: {sender_addr}", file=sys.stderr)
-                    imap.store(msg_id, "+FLAGS", "\\Seen")
+                    db_storage.mark_email_processed(message_id, sender_addr)
                     continue
 
                 body = _extract_body(msg)
                 body = _strip_quoted_reply(body)
                 if body:
                     results.append((sender_addr, domain, body))
-                # Explicitly mark Seen (should already happen via fetch,
-                # but IMAP servers vary — don't rely on the side effect).
-                imap.store(msg_id, "+FLAGS", "\\Seen")
+                    processed_count += 1
+                # Record as processed in our own DB regardless of Gmail's
+                # \Seen flag — this is the source of truth now, not IMAP
+                # state, so it survives anything else touching this inbox.
+                db_storage.mark_email_processed(message_id, sender_addr)
         return results
     except imaplib.IMAP4.error as e:
         print(f"[error] IMAP login/search failed: {e}", file=sys.stderr)
