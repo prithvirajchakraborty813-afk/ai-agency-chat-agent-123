@@ -34,7 +34,12 @@ jobs:
           RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
           POLL_EMAIL_SECRET: ${{ secrets.POLL_EMAIL_SECRET }}
         run: |
+          # 180s ceiling: Render free-tier cold start alone can eat 50s+,
+          # then the actual IMAP poll still has to run on top of that.
+          # 60s wasn't leaving room for both — this is why you were
+          # seeing "HTTP Status: 000" / exit code 28 (curl gave up
+          # waiting, no response ever came back).
           curl -s -X POST "$RENDER_APP_URL/poll-email" \
             -H "X-Poll-Secret: $POLL_EMAIL_SECRET" \
-            --max-time 60 \
+            --max-time 180 \
             -w "\nHTTP Status: %{http_code}\n"
