@@ -40,3 +40,20 @@ jobs:
           OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python run_daily_chain.py
+
+      - name: Poll Gmail for lead replies
+        # Hits the deployed chat_agent.py service (Render), not this
+        # runner — the polling logic and Gemini conversation engine both
+        # live there. RENDER_APP_URL is just the base URL of that service,
+        # e.g. https://your-service.onrender.com — no trailing slash.
+        # continue-on-error: a broken email poll shouldn't fail the whole
+        # daily run or block the lead-gen chain above, which already
+        # succeeded by this point.
+        continue-on-error: true
+        env:
+          RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
+          POLL_EMAIL_SECRET: ${{ secrets.POLL_EMAIL_SECRET }}
+        run: |
+          curl -sf -X POST "$RENDER_APP_URL/poll-email" \
+            -H "X-Poll-Secret: $POLL_EMAIL_SECRET" \
+            --max-time 60

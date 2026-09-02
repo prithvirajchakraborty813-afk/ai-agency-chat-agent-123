@@ -83,6 +83,7 @@ from flask import Flask, request, jsonify
 
 import order_contract
 import db_storage
+import email_sender
 
 # ---------------------------------------------------------------------------
 # Vertex AI auth on Render — Render has no gcloud CLI and no attached
@@ -113,6 +114,10 @@ WAHA_SESSION = os.environ.get("WAHA_SESSION", "default")
 WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
 GCP_PROJECT = os.environ.get("GCP_PROJECT", "")
 OWNER_UPI_ID = os.environ.get("OWNER_UPI_ID", "")
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+POLL_EMAIL_SECRET = os.environ.get("POLL_EMAIL_SECRET", "")  # shared secret so /poll-email can't be hit by randoms
+EMAIL_REPLY_SUBJECT = "Re: your message"
 
 
 def _to_chat_id(digits_only_phone: str) -> str:
@@ -255,11 +260,34 @@ def get_gemini_client() -> VertexGeminiClient:
 
 
 # ---------------------------------------------------------------------------
-# Sending WhatsApp messages — via a self-hosted WAHA instance instead of
-# Whapi.Cloud (no message-volume cap; see the module docstring for why).
+# Sending messages — via a self-hosted WAHA instance for WhatsApp leads
+# (see module docstring for why WAHA over Whapi.Cloud), or via Gmail SMTP
+# for email leads. Every call site in this file calls send_whatsapp(id,
+# text) with a single `id` string; the "email:" prefix (same convention
+# send_proposals.py already uses for dedup keys) is what tells this
+# function — and nothing else in the file — which channel to use. This
+# means the whole stage machine, owner alerts, contracts, escalation
+# handling, etc. all work for email leads with no changes anywhere else.
 # ---------------------------------------------------------------------------
 
+def _is_email_id(identifier: str) -> bool:
+    return identifier.startswith("email:")
+
+
 def send_whatsapp(to_phone: str, text: str) -> bool:
+    if _is_email_id(to_phone):
+        convo = db_storage.load_conversation(to_phone)
+        reply_to = (convo or {}).get("email_address", "")
+        if not reply_to:
+            print(f"[error] No email_address stored on conversation {to_phone} — cannot send.", file=sys.stderr)
+            return False
+        ok, detail = email_sender.send_email(
+            GMAIL_ADDRESS, GMAIL_APP_PASSWORD, reply_to, EMAIL_REPLY_SUBJECT, text
+        )
+        if not ok:
+            print(f"[error] Failed to send email to {reply_to}: {detail}", file=sys.stderr)
+        return ok
+
     if not WAHA_BASE_URL:
         print("[error] WAHA_BASE_URL not set — cannot send message. Set it as an env var.", file=sys.stderr)
         return False
@@ -301,6 +329,14 @@ def send_whatsapp_image(to_phone: str, image_bytes: bytes, caption: str = "") ->
     public URL) — not multipart form data like Whapi's endpoint — since a
     QR code is generated in-memory here, base64 is the simpler path.
     """
+    if _is_email_id(to_phone):
+        # No image channel for email leads — the text contract's upi://
+        # link plus the raw UPI ID (already in the text message) is the
+        # fallback; this just needs to not crash the caller, since
+        # _send_contract_and_qr treats image failure as non-fatal already.
+        print(f"[info] Skipping QR image for {to_phone} — no image channel over email.")
+        return False
+
     if not WAHA_BASE_URL:
         print("[error] WAHA_BASE_URL not set — cannot send image. Set it as an env var.", file=sys.stderr)
         return False
@@ -421,7 +457,12 @@ def _save_conversations(conversations: dict) -> None:
         db_storage.save_conversation(phone, convo)
 
 
-def get_or_create_conversation(phone: str) -> dict:
+def get_or_create_conversation(phone: str, email_address: str = "") -> dict:
+    """`phone` is the conversation's identifier — a plain digit string for
+    WhatsApp leads, or "email:<domain>" for email leads (see send_whatsapp
+    above). email_address is only used the first time an email:<domain>
+    conversation is created, to remember the real reply-to address (the
+    domain alone isn't enough to send a reply to)."""
     with _state_lock:
         convo = db_storage.load_conversation(phone)
         if convo is None:
@@ -441,6 +482,14 @@ def get_or_create_conversation(phone: str) -> dict:
                 "fixed_price": None,         # set once customer picks from catalog (None for custom)
                 "created_at": _now(),
             }
+            if _is_email_id(phone) and email_address:
+                convo["email_address"] = email_address
+            db_storage.save_conversation(phone, convo)
+        elif _is_email_id(phone) and email_address and not convo.get("email_address"):
+            # Backfill for a conversation row created before this field
+            # existed, or created oddly without it — never overwrite a
+            # real stored address with a new one silently.
+            convo["email_address"] = email_address
             db_storage.save_conversation(phone, convo)
         return convo
 
@@ -1161,6 +1210,60 @@ def webhook():
                 handle_lead_message(from_number, text)
 
     return jsonify({"status": "received"}), 200
+
+
+@app.route("/poll-email", methods=["POST"])
+def poll_email():
+    """Checks the Gmail inbox once for new replies and feeds each one into
+    the same handle_lead_message() the WhatsApp webhook uses — a lead who
+    replies over email gets the identical stage machine, Gemini prompts,
+    catalog, escalation detection, and owner-approval flow as a WhatsApp
+    lead. Meant to be called once per day by the GitHub Actions daily
+    chain (not polled continuously), since email doesn't need the
+    near-real-time responsiveness WhatsApp does.
+
+    Protected by a shared secret (POLL_EMAIL_SECRET) in the X-Poll-Secret
+    header, since this route triggers real outbound Gemini calls and
+    replies — it shouldn't be callable by anyone who finds the URL.
+    """
+    if POLL_EMAIL_SECRET:
+        if request.headers.get("X-Poll-Secret", "") != POLL_EMAIL_SECRET:
+            return jsonify({"status": "error", "detail": "bad or missing X-Poll-Secret"}), 401
+    else:
+        print("[warning] POLL_EMAIL_SECRET not set — /poll-email is callable by anyone with the URL.")
+
+    replies = email_sender.fetch_new_replies(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+    print(f"[info] /poll-email: {len(replies)} new email reply(ies) found.")
+
+    processed = 0
+    for sender_addr, domain, body in replies:
+        convo_id = f"email:{domain}"
+        # Matches a reply back to its lead by DOMAIN, not the exact sender
+        # address — same limitation as the original send: this pipeline
+        # never captured a real per-lead email, only a guessed info@/
+        # contact@ address, so "someone at this domain replied" is the
+        # best available match. If two different people at the same
+        # domain email in, they share one conversation — an accepted
+        # tradeoff given the alternative is no email channel at all.
+        get_or_create_conversation(convo_id, email_address=sender_addr)
+        append_to_log({
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "raw_payload": {"channel": "email", "from": sender_addr, "domain": domain, "body": body},
+        })
+
+        convo = get_or_create_conversation(convo_id)
+        stage = convo.get("stage", "warming_up")
+        if detect_escalation_request(body) and stage in ("awaiting_owner_approval", "awaiting_payment"):
+            append_history(convo_id, "lead", body)
+            handle_post_lock_message(convo_id, body, stage)
+        elif detect_escalation_request(body):
+            append_history(convo_id, "lead", body)
+            handle_escalation(convo_id, body)
+        else:
+            handle_lead_message(convo_id, body)
+        processed += 1
+
+    return jsonify({"status": "ok", "replies_found": len(replies), "processed": processed}), 200
 
 
 @app.route("/", methods=["GET"])
