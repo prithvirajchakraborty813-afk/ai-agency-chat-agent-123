@@ -189,7 +189,7 @@ def _strip_quoted_reply(body: str) -> str:
 
 
 def fetch_new_replies(gmail_address: str, gmail_app_password: str,
-                       max_messages: int = 50) -> list[tuple[str, str, str]]:
+                       max_messages: int = 5) -> list[tuple[str, str, str]]:
     """Connects over IMAP, finds UNSEEN messages in the inbox, and returns
     them as (sender_email, sender_domain, body) tuples — marking each one
     Seen as it's read, so a message is never returned twice across runs.
@@ -244,8 +244,9 @@ def fetch_new_replies(gmail_address: str, gmail_app_password: str,
                 local_part = sender_addr.split("@", 1)[0]
                 NOREPLY_LOCAL_PARTS = (
                     "noreply", "no-reply", "donotreply", "do-not-reply",
-                    "notifications", "notification", "mailer-daemon",
-                    "postmaster", "messages", "alert", "alerts", "updates",
+                    "notification", "notifications", "mailer-daemon",
+                    "postmaster", "messages", "message", "alert", "alerts",
+                    "update", "updates", "notify",
                 )
                 # Domains of consumer platforms whose automated mail (likes,
                 # comments, notifications, digests) can land in any inbox
