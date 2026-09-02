@@ -4,6 +4,15 @@ send_proposals.py — sends the real proposal_text from proposals.csv to
 each lead's WhatsApp, via a self-hosted WAHA instance (uses your own
 linked number, no message-volume cap unlike Whapi.Cloud's free tier).
 
+EMAIL FALLBACK: if a lead has no phone number on file, or the WhatsApp
+send fails, and the lead has a `domain` value, this now also tries
+Gmail as a fallback — see email_sender.py's module docstring for the
+important limitation (it's a guessed info@/contact@ address, not a
+real captured email; expect a meaningfully lower hit rate than
+WhatsApp). Set GMAIL_ADDRESS and GMAIL_APP_PASSWORD to enable it;
+leave them unset and this script behaves exactly as before,
+WhatsApp-only.
+
 WHY PACED, NOT ALL AT ONCE: sending 10 messages back-to-back looks
 robotic and is exactly the pattern WhatsApp's spam detection watches
 for. This script waits a random 60-180 seconds between sends by
@@ -30,6 +39,8 @@ Options:
     --min-delay / --max-delay   seconds between sends (default 60-180)
     --dry-run                   print what would be sent, without sending
     --log                       path to the send log (default sent_log.csv)
+    --no-email-fallback         disable the Gmail fallback even if
+                                 GMAIL_ADDRESS/GMAIL_APP_PASSWORD are set
 """
 
 from __future__ import annotations
@@ -44,6 +55,7 @@ import time
 import requests
 
 import db_storage
+import email_sender
 
 
 def normalize_phone(raw: str) -> str | None:
@@ -89,53 +101,91 @@ def send_message(waha_url: str, session: str, api_key: str, to: str, body: str) 
         return False, str(e)
 
 
+def _email_key(domain: str) -> str | None:
+    """Dedup/contacted-leads key for the email channel — kept distinct from
+    the phone key (same "email:<domain>" prefix pattern chat_agent.py uses
+    for "tg:<chat_id>") so a lead can be independently tracked as
+    WhatsApp-contacted and/or email-contacted without the two colliding."""
+    d = (domain or "").strip().lower()
+    return f"email:{d}" if d else None
+
+
 def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float, max_delay: float,
-        log_path: str, dry_run: bool) -> None:
+        log_path: str, dry_run: bool, email_fallback: bool,
+        gmail_address: str, gmail_app_password: str) -> None:
     with open(in_csv, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
     # Cross-run/cross-day dedup lives in Postgres, not the local log file —
     # see db_storage.contacted_leads for why (ephemeral cron filesystem).
     db_storage.init_db()
-    already_sent = db_storage.load_all_contacted_phones()
+    already_sent = db_storage.load_all_contacted_phones()  # holds phone keys AND "email:<domain>" keys
     log_exists = os.path.exists(log_path)
     log_file = open(log_path, "a", newline="", encoding="utf-8")
-    log_writer = csv.DictWriter(log_file, fieldnames=["name", "phone", "status", "detail"])
+    log_writer = csv.DictWriter(log_file, fieldnames=["name", "phone", "channel", "status", "detail"])
     if not log_exists:
         log_writer.writeheader()
 
-    sent, skipped_no_phone, skipped_already, failed = 0, 0, 0, 0
+    sent, skipped_no_channel, skipped_already, failed = 0, 0, 0, 0
 
     for i, row in enumerate(rows, 1):
         name = row.get("name", "").strip()
         proposal_text = row.get("proposal_text", "").strip()
         raw_phone = row.get("phone", "")
+        domain = row.get("domain", "").strip()
         to = normalize_phone(raw_phone)
+        e_key = _email_key(domain)
 
-        if not to:
-            print(f"  [{i}/{len(rows)}] {name:40s} -> SKIPPED (no phone on file)")
-            log_writer.writerow({"name": name, "phone": raw_phone, "status": "skipped_no_phone", "detail": ""})
-            skipped_no_phone += 1
-            continue
+        can_try_whatsapp = bool(to) and to not in already_sent
+        can_try_email = email_fallback and bool(e_key) and e_key not in already_sent
 
-        if to in already_sent:
-            print(f"  [{i}/{len(rows)}] {name:40s} -> already sent previously, skipping")
-            skipped_already += 1
+        if not can_try_whatsapp and not can_try_email:
+            reason = "already sent on every available channel" if (to or e_key) else "no phone or domain on file"
+            print(f"  [{i}/{len(rows)}] {name:40s} -> SKIPPED ({reason})")
+            log_writer.writerow({"name": name, "phone": raw_phone, "channel": "", "status": "skipped", "detail": reason})
+            if to or e_key:
+                skipped_already += 1
+            else:
+                skipped_no_channel += 1
             continue
 
         if dry_run:
-            print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD SEND to {to}: {proposal_text[:80]}...")
+            if can_try_whatsapp:
+                print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD SEND (WhatsApp) to {to}: {proposal_text[:80]}...")
+            elif can_try_email:
+                guesses = email_sender.guess_email_addresses(domain)
+                print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD EMAIL (guessed {guesses}): {proposal_text[:80]}...")
             continue
 
-        ok, detail = send_message(waha_url, session, api_key, to, proposal_text)
-        if ok:
-            print(f"  [{i}/{len(rows)}] {name:40s} -> sent to {to}")
-            log_writer.writerow({"name": name, "phone": to, "status": "sent", "detail": detail})
-            db_storage.mark_contacted(to, name, detail)
+        sent_ok = False
+
+        if can_try_whatsapp:
+            ok, detail = send_message(waha_url, session, api_key, to, proposal_text)
+            if ok:
+                print(f"  [{i}/{len(rows)}] {name:40s} -> sent (WhatsApp) to {to}")
+                log_writer.writerow({"name": name, "phone": to, "channel": "whatsapp", "status": "sent", "detail": detail})
+                db_storage.mark_contacted(to, name, detail)
+                sent_ok = True
+            else:
+                print(f"  [{i}/{len(rows)}] {name:40s} -> WhatsApp FAILED: {detail}", file=sys.stderr)
+                log_writer.writerow({"name": name, "phone": to, "channel": "whatsapp", "status": "failed", "detail": detail})
+
+        if not sent_ok and can_try_email:
+            subject = f"AI customer-engagement assistant for {name}" if name else "AI customer-engagement assistant"
+            ok, detail = email_sender.send_email_with_fallback_guesses(
+                gmail_address, gmail_app_password, domain, subject, proposal_text)
+            if ok:
+                print(f"  [{i}/{len(rows)}] {name:40s} -> sent (email fallback), {detail}")
+                log_writer.writerow({"name": name, "phone": e_key, "channel": "email", "status": "sent", "detail": detail})
+                db_storage.mark_contacted(e_key, name, detail)
+                sent_ok = True
+            else:
+                print(f"  [{i}/{len(rows)}] {name:40s} -> email fallback FAILED: {detail}", file=sys.stderr)
+                log_writer.writerow({"name": name, "phone": e_key, "channel": "email", "status": "failed", "detail": detail})
+
+        if sent_ok:
             sent += 1
         else:
-            print(f"  [{i}/{len(rows)}] {name:40s} -> FAILED: {detail}", file=sys.stderr)
-            log_writer.writerow({"name": name, "phone": to, "status": "failed", "detail": detail})
             failed += 1
 
         log_file.flush()
@@ -153,12 +203,12 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
         print(f"\nDry run complete. Nothing was actually sent.")
     else:
         print(f"\nDone. Sent: {sent}, already-sent (skipped): {skipped_already}, "
-              f"no phone (skipped): {skipped_no_phone}, failed: {failed}")
+              f"no phone/domain (skipped): {skipped_no_channel}, failed: {failed}")
         print(f"Full log at {log_path}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Send real proposal_text to leads in proposals.csv via a self-hosted WAHA instance.")
+    parser = argparse.ArgumentParser(description="Send real proposal_text to leads in proposals.csv via a self-hosted WAHA instance, with an optional Gmail fallback.")
     parser.add_argument("--in", dest="in_csv", default="proposals.csv")
     parser.add_argument("--waha-url", dest="waha_url", default=os.environ.get("WAHA_BASE_URL", "http://localhost:3000"),
                          help="Base URL of your WAHA instance (or set WAHA_BASE_URL env var)")
@@ -170,13 +220,25 @@ def main() -> None:
     parser.add_argument("--max-delay", type=float, default=180, help="Maximum seconds between sends")
     parser.add_argument("--log", default="sent_log.csv")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be sent without sending")
+    parser.add_argument("--no-email-fallback", dest="email_fallback", action="store_false",
+                         help="Disable the Gmail fallback even if GMAIL_ADDRESS/GMAIL_APP_PASSWORD are set")
+    parser.add_argument("--gmail-address", default=os.environ.get("GMAIL_ADDRESS", ""),
+                         help="Gmail address to send fallback emails from (or set GMAIL_ADDRESS env var)")
+    parser.add_argument("--gmail-app-password", default=os.environ.get("GMAIL_APP_PASSWORD", ""),
+                         help="Gmail App Password, NOT your normal password (or set GMAIL_APP_PASSWORD env var)")
+    parser.set_defaults(email_fallback=True)
     args = parser.parse_args()
 
     if not args.dry_run and not args.waha_url:
         parser.error("Missing --waha-url (or set the WAHA_BASE_URL environment variable).")
 
+    email_fallback = args.email_fallback and bool(args.gmail_address) and bool(args.gmail_app_password)
+    if args.email_fallback and not email_fallback and not args.dry_run:
+        print("[info] Gmail fallback disabled — GMAIL_ADDRESS/GMAIL_APP_PASSWORD not both set.", file=sys.stderr)
+
     run(args.in_csv, args.waha_url, args.waha_session, args.waha_key,
-        args.min_delay, args.max_delay, args.log, args.dry_run)
+        args.min_delay, args.max_delay, args.log, args.dry_run,
+        email_fallback, args.gmail_address, args.gmail_app_password)
 
 
 if __name__ == "__main__":
