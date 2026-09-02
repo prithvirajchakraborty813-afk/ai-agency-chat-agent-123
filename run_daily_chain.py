@@ -16,7 +16,10 @@ variables instead, so you edit them in Render's dashboard, never in code:
     COUNT_PER_CITY     businesses per city anchor (default 8)
     PRODUCT_NAME       your product name, for the qualifier/proposal steps
     PRODUCT_PITCH      one-line pitch of what it does / solves
-    WHAPI_TOKEN        Whapi.Cloud token (also used by send_proposals.py)
+    WAHA_BASE_URL      base URL of your self-hosted WAHA instance (also
+                        used by send_proposals.py)
+    WAHA_SESSION       WAHA session name, default "default"
+    WAHA_API_KEY       WAHA X-Api-Key, if set (optional)
     OWNER_PHONE        your own WhatsApp number, digits only, country code
                         included — where failure notifications go
     DATABASE_URL       Postgres connection string (already required by
@@ -39,20 +42,24 @@ import sys
 
 import requests
 
-WHAPI_ENDPOINT = "https://gate.whapi.cloud/messages/text"
+WAHA_BASE_URL = os.environ.get("WAHA_BASE_URL", "http://localhost:3000").rstrip("/")
+WAHA_SESSION = os.environ.get("WAHA_SESSION", "default")
+WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
 
 
 def notify_owner(message: str) -> None:
-    token = os.environ.get("WHAPI_TOKEN")
     owner = os.environ.get("OWNER_PHONE")
-    if not token or not owner:
-        print(f"[owner notify skipped — WHAPI_TOKEN/OWNER_PHONE not set] {message}", file=sys.stderr)
+    if not WAHA_BASE_URL or not owner:
+        print(f"[owner notify skipped — WAHA_BASE_URL/OWNER_PHONE not set] {message}", file=sys.stderr)
         return
     try:
+        headers = {"Content-Type": "application/json"}
+        if WAHA_API_KEY:
+            headers["X-Api-Key"] = WAHA_API_KEY
         requests.post(
-            WHAPI_ENDPOINT,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"to": owner, "body": message},
+            f"{WAHA_BASE_URL}/api/sendText",
+            headers=headers,
+            json={"session": WAHA_SESSION, "chatId": f"{owner}@c.us", "text": message},
             timeout=20,
         )
     except requests.RequestException as e:
@@ -83,7 +90,7 @@ def require_env(*names: str) -> None:
 
 
 def main() -> None:
-    require_env("GCP_PROJECT", "LEAD_DESCRIPTION", "PRODUCT_NAME", "PRODUCT_PITCH", "WHAPI_TOKEN")
+    require_env("GCP_PROJECT", "LEAD_DESCRIPTION", "PRODUCT_NAME", "PRODUCT_PITCH", "WAHA_BASE_URL")
 
     project = os.environ["GCP_PROJECT"]
     description = os.environ["LEAD_DESCRIPTION"]

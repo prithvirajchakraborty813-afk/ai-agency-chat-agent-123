@@ -34,7 +34,8 @@ WHAT THIS DOES NOT DO YET:
     decision.
 
 HOW TO RUN THIS: this REPLACES running webhook_receiver.py directly.
-Same setup (ngrok, Whapi webhook URL pointed at /webhook) — just run
+Same setup — point your WAHA session's webhook at this app's /webhook
+(WAHA session config, "webhooks" -> "url", event "message") — just run
 this file instead. It does everything webhook_receiver.py did
 (logging every raw payload, so nothing is ever silently lost) plus
 the actual conversation logic.
@@ -46,9 +47,22 @@ Needs the same Vertex AI setup as the other agents:
 
 Set these before running (or edit the constants below):
     OWNER_PHONE      — Billo's own WhatsApp number, digits only, no +
-    WHAPI_TOKEN       — same token send_proposals.py already uses
+    WAHA_BASE_URL     — your self-hosted WAHA instance URL, e.g.
+                        http://localhost:3000 or your Render URL for it
+    WAHA_SESSION      — WAHA session name (default "default")
+    WAHA_API_KEY      — WAHA's X-Api-Key, if you set one (optional locally,
+                        strongly recommended once WAHA is exposed on Render)
     GCP_PROJECT       — same project the other Gemini agents use
     OWNER_UPI_ID      — the UPI ID customers will pay to
+
+WHY WAHA INSTEAD OF WHAPI.CLOUD: Whapi.Cloud's free tier caps message
+volume; once that cap is hit, sends start failing. WAHA is a
+self-hosted, open-source WhatsApp HTTP API (runs as a Docker
+container you deploy yourself, e.g. as its own Render service) with
+no message-volume cap — WhatsApp's own per-number sending limits
+still apply, but there is no vendor tier to run out of. It talks to
+WhatsApp Web under the hood (same idea as Whapi.Cloud), so the same
+personal-number/ban-risk tradeoff from before still applies.
 """
 
 from __future__ import annotations
@@ -94,10 +108,32 @@ if _ADC_JSON and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
 # ---------------------------------------------------------------------------
 
 OWNER_PHONE = os.environ.get("OWNER_PHONE", "919433066933")  # digits only, no +
-WHAPI_TOKEN = os.environ.get("WHAPI_TOKEN", "")
-WHAPI_SEND_URL = "https://gate.whapi.cloud/messages/text"
+WAHA_BASE_URL = os.environ.get("WAHA_BASE_URL", "http://localhost:3000").rstrip("/")
+WAHA_SESSION = os.environ.get("WAHA_SESSION", "default")
+WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
 GCP_PROJECT = os.environ.get("GCP_PROJECT", "")
 OWNER_UPI_ID = os.environ.get("OWNER_UPI_ID", "")
+
+
+def _to_chat_id(digits_only_phone: str) -> str:
+    """WAHA identifies chats as '<digits>@c.us' (no '+', no spaces) rather
+    than Whapi's bare digit-string 'to' field. Every send_* function below
+    goes through this so callers can keep passing the same plain digit
+    strings used everywhere else in this codebase (db_storage, order_contract,
+    etc.) without having to know about WAHA's chatId format."""
+    phone = digits_only_phone.strip()
+    if phone.endswith("@c.us"):
+        return phone
+    return f"{phone}@c.us"
+
+
+def _waha_headers(extra: dict | None = None) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if WAHA_API_KEY:
+        headers["X-Api-Key"] = WAHA_API_KEY
+    if extra:
+        headers.update(extra)
+    return headers
 
 # Loop-limit guard for the "package_selected" stage: if the lead has sent
 # this many messages without Gemini ever returning ready_to_propose, the
@@ -131,8 +167,8 @@ def _startup_checks() -> None:
     created, and the very first real webhook hit would fail querying
     tables that don't exist yet."""
     print("Chat agent starting...")
-    if not WHAPI_TOKEN:
-        print("[warning] WHAPI_TOKEN is not set — sending will fail until you export it.")
+    if not WAHA_BASE_URL:
+        print("[warning] WAHA_BASE_URL is not set — sending will fail until you export it.")
     if not GCP_PROJECT:
         print("[warning] GCP_PROJECT is not set — Gemini calls will fail until you export it.")
     if not _ADC_JSON and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -219,21 +255,23 @@ def get_gemini_client() -> VertexGeminiClient:
 
 
 # ---------------------------------------------------------------------------
-# Sending WhatsApp messages — same endpoint send_proposals.py already uses
+# Sending WhatsApp messages — via a self-hosted WAHA instance instead of
+# Whapi.Cloud (no message-volume cap; see the module docstring for why).
 # ---------------------------------------------------------------------------
 
 def send_whatsapp(to_phone: str, text: str) -> bool:
-    if not WHAPI_TOKEN:
-        print("[error] WHAPI_TOKEN not set — cannot send message. Set it as an env var.", file=sys.stderr)
+    if not WAHA_BASE_URL:
+        print("[error] WAHA_BASE_URL not set — cannot send message. Set it as an env var.", file=sys.stderr)
         return False
     try:
         resp = requests.post(
-            WHAPI_SEND_URL,
-            headers={
-                "Authorization": f"Bearer {WHAPI_TOKEN}",
-                "Content-Type": "application/json",
+            f"{WAHA_BASE_URL}/api/sendText",
+            headers=_waha_headers(),
+            json={
+                "session": WAHA_SESSION,
+                "chatId": _to_chat_id(to_phone),
+                "text": text,
             },
-            json={"to": to_phone, "body": text},
             timeout=15,
         )
         resp.raise_for_status()
@@ -241,9 +279,6 @@ def send_whatsapp(to_phone: str, text: str) -> bool:
     except Exception as e:
         print(f"[error] Failed to send WhatsApp message to {to_phone}: {e}", file=sys.stderr)
         return False
-
-
-WHAPI_SEND_IMAGE_URL = "https://gate.whapi.cloud/messages/image"
 
 
 def send_whatsapp_image(to_phone: str, image_bytes: bytes, caption: str = "") -> bool:
@@ -261,17 +296,30 @@ def send_whatsapp_image(to_phone: str, image_bytes: bytes, caption: str = "") ->
     sent as a companion to the text link, not a replacement — the text
     link still works for phones that DO support it, and typing the UPI ID
     manually is always still possible as a last resort.
+
+    WAHA's /api/sendImage wants the image as base64 in file.data (or a
+    public URL) — not multipart form data like Whapi's endpoint — since a
+    QR code is generated in-memory here, base64 is the simpler path.
     """
-    if not WHAPI_TOKEN:
-        print("[error] WHAPI_TOKEN not set — cannot send image. Set it as an env var.", file=sys.stderr)
+    if not WAHA_BASE_URL:
+        print("[error] WAHA_BASE_URL not set — cannot send image. Set it as an env var.", file=sys.stderr)
         return False
     try:
+        import base64
         resp = requests.post(
-            WHAPI_SEND_IMAGE_URL,
-            headers={"Authorization": f"Bearer {WHAPI_TOKEN}"},
-            data={"to": to_phone, "caption": caption},
-            files={"media": ("payment_qr.png", image_bytes, "image/png")},
-            timeout=20,
+            f"{WAHA_BASE_URL}/api/sendImage",
+            headers=_waha_headers(),
+            json={
+                "session": WAHA_SESSION,
+                "chatId": _to_chat_id(to_phone),
+                "file": {
+                    "mimetype": "image/png",
+                    "filename": "payment_qr.png",
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                },
+                "caption": caption,
+            },
+            timeout=30,
         )
         resp.raise_for_status()
         return True
@@ -1062,18 +1110,29 @@ def webhook():
         "raw_payload": payload,
     })
 
-    for msg in payload.get("messages", []):
-        from_number = msg.get("from", "unknown")
-        if msg.get("from_me") and from_number != OWNER_PHONE:
+    # WAHA's shape differs from Whapi's: one event per webhook POST, under
+    # payload.event == "message" (not a "messages" array), with the phone
+    # in payload.from as "<digits>@c.us" and the text directly on
+    # payload.body (not nested under text.body). We normalize both here so
+    # the rest of this function keeps working with plain digit strings,
+    # matching what db_storage/order_contract/send_whatsapp all expect.
+    event = payload.get("event")
+    msg_payload = payload.get("payload", {}) if event else {}
+    messages = [msg_payload] if event == "message" else []
+
+    for msg in messages:
+        raw_from = msg.get("from", "unknown")
+        from_number = raw_from.split("@")[0] if raw_from else "unknown"
+        if msg.get("fromMe") and from_number != OWNER_PHONE:
             # Skip echoes of the bot's own outgoing sends. Note: when the
-            # owner's own WhatsApp channel IS the OWNER_PHONE number,
-            # Whapi tags the owner's real replies as from_me: true too
-            # (multi-device echo), with "from" correctly set to
-            # OWNER_PHONE. So from_me alone is NOT a safe filter — it
+            # owner's own WhatsApp channel IS the OWNER_PHONE number, WAHA
+            # (like Whapi before it) tags the owner's real replies as
+            # fromMe: true too (multi-device echo), with "from" correctly
+            # set to OWNER_PHONE. So fromMe alone is NOT a safe filter — it
             # was silently swallowing real APPROVE/SETPRICE replies.
-            # Only skip when from_me AND it's not the owner's number.
+            # Only skip when fromMe AND it's not the owner's number.
             continue
-        text = msg.get("text", {}).get("body", "")
+        text = msg.get("body", "")
         if not text:
             continue  # non-text event (reaction, etc) — nothing to act on yet
 
@@ -1118,5 +1177,5 @@ if __name__ == "__main__":
     # defaults to 5000 for local/dev use, matching the old hardcoded value).
     port = int(os.environ.get("PORT", 5000))
     print(f"Listening on 0.0.0.0:{port}")
-    print("Point your webhook URL (ngrok locally, or your Render URL once deployed) + /webhook in Whapi's dashboard.")
+    print("Point your WAHA session's webhook URL (ngrok locally, or your Render URL once deployed) + /webhook at this app, with event 'message' enabled.")
     app.run(host="0.0.0.0", port=port)

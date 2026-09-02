@@ -34,7 +34,9 @@ jobs:
           COUNT_PER_CITY: ${{ secrets.COUNT_PER_CITY }}
           PRODUCT_NAME: ${{ secrets.PRODUCT_NAME }}
           PRODUCT_PITCH: ${{ secrets.PRODUCT_PITCH }}
-          WHAPI_TOKEN: ${{ secrets.WHAPI_TOKEN }}
+          WAHA_BASE_URL: ${{ secrets.WAHA_BASE_URL }}
+          WAHA_SESSION: ${{ secrets.WAHA_SESSION }}
+          WAHA_API_KEY: ${{ secrets.WAHA_API_KEY }}
           OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python run_daily_chain.py

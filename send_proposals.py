@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 send_proposals.py — sends the real proposal_text from proposals.csv to
-each lead's WhatsApp, via Whapi.Cloud (uses your own linked number).
+each lead's WhatsApp, via a self-hosted WAHA instance (uses your own
+linked number, no message-volume cap unlike Whapi.Cloud's free tier).
 
 WHY PACED, NOT ALL AT ONCE: sending 10 messages back-to-back looks
 robotic and is exactly the pattern WhatsApp's spam detection watches
@@ -16,11 +17,16 @@ and skips anyone already marked "sent" — so if this crashes halfway
 through, or you run it again by mistake, nobody gets double-messaged.
 
 Usage:
-    python send_proposals.py --in proposals.csv --token YOUR_WHAPI_TOKEN
+    python send_proposals.py --in proposals.csv --waha-url http://localhost:3000
 
-    (or set WHAPI_TOKEN as an environment variable instead of --token)
+    (or set WAHA_BASE_URL as an environment variable instead of --waha-url)
 
 Options:
+    --waha-url                  base URL of your WAHA instance (default
+                                 http://localhost:3000, or WAHA_BASE_URL env var)
+    --waha-session               WAHA session name (default "default", or
+                                 WAHA_SESSION env var)
+    --waha-key                  WAHA X-Api-Key, if set (or WAHA_API_KEY env var)
     --min-delay / --max-delay   seconds between sends (default 60-180)
     --dry-run                   print what would be sent, without sending
     --log                       path to the send log (default sent_log.csv)
@@ -39,11 +45,11 @@ import requests
 
 import db_storage
 
-WHAPI_ENDPOINT = "https://gate.whapi.cloud/messages/text"
-
 
 def normalize_phone(raw: str) -> str | None:
-    """Whapi wants digits only, country code included, no '+' or spaces."""
+    """WAHA (like Whapi before it) wants digits only, country code
+    included, no '+' or spaces — the '@c.us' suffix is added separately
+    when building the chatId for the API call."""
     if not raw or not raw.strip():
         return None
     digits = "".join(ch for ch in raw if ch.isdigit())
@@ -67,12 +73,15 @@ def load_already_sent(log_path: str) -> set[str]:
     return sent
 
 
-def send_message(token: str, to: str, body: str) -> tuple[bool, str]:
+def send_message(waha_url: str, session: str, api_key: str, to: str, body: str) -> tuple[bool, str]:
     try:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["X-Api-Key"] = api_key
         resp = requests.post(
-            WHAPI_ENDPOINT,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"to": to, "body": body},
+            f"{waha_url.rstrip('/')}/api/sendText",
+            headers=headers,
+            json={"session": session, "chatId": f"{to}@c.us", "text": body},
             timeout=20,
         )
         return resp.ok, f"{resp.status_code}: {resp.text[:300]}"
@@ -80,7 +89,7 @@ def send_message(token: str, to: str, body: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def run(in_csv: str, token: str, min_delay: float, max_delay: float,
+def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float, max_delay: float,
         log_path: str, dry_run: bool) -> None:
     with open(in_csv, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -118,7 +127,7 @@ def run(in_csv: str, token: str, min_delay: float, max_delay: float,
             print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD SEND to {to}: {proposal_text[:80]}...")
             continue
 
-        ok, detail = send_message(token, to, proposal_text)
+        ok, detail = send_message(waha_url, session, api_key, to, proposal_text)
         if ok:
             print(f"  [{i}/{len(rows)}] {name:40s} -> sent to {to}")
             log_writer.writerow({"name": name, "phone": to, "status": "sent", "detail": detail})
@@ -149,20 +158,25 @@ def run(in_csv: str, token: str, min_delay: float, max_delay: float,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Send real proposal_text to leads in proposals.csv via Whapi.Cloud.")
+    parser = argparse.ArgumentParser(description="Send real proposal_text to leads in proposals.csv via a self-hosted WAHA instance.")
     parser.add_argument("--in", dest="in_csv", default="proposals.csv")
-    parser.add_argument("--token", default=os.environ.get("WHAPI_TOKEN"),
-                         help="Whapi.Cloud API token (or set WHAPI_TOKEN env var)")
+    parser.add_argument("--waha-url", dest="waha_url", default=os.environ.get("WAHA_BASE_URL", "http://localhost:3000"),
+                         help="Base URL of your WAHA instance (or set WAHA_BASE_URL env var)")
+    parser.add_argument("--waha-session", dest="waha_session", default=os.environ.get("WAHA_SESSION", "default"),
+                         help="WAHA session name (or set WAHA_SESSION env var)")
+    parser.add_argument("--waha-key", dest="waha_key", default=os.environ.get("WAHA_API_KEY", ""),
+                         help="WAHA X-Api-Key, if set (or set WAHA_API_KEY env var)")
     parser.add_argument("--min-delay", type=float, default=60, help="Minimum seconds between sends")
     parser.add_argument("--max-delay", type=float, default=180, help="Maximum seconds between sends")
     parser.add_argument("--log", default="sent_log.csv")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be sent without sending")
     args = parser.parse_args()
 
-    if not args.dry_run and not args.token:
-        parser.error("Missing --token (or set the WHAPI_TOKEN environment variable).")
+    if not args.dry_run and not args.waha_url:
+        parser.error("Missing --waha-url (or set the WAHA_BASE_URL environment variable).")
 
-    run(args.in_csv, args.token, args.min_delay, args.max_delay, args.log, args.dry_run)
+    run(args.in_csv, args.waha_url, args.waha_session, args.waha_key,
+        args.min_delay, args.max_delay, args.log, args.dry_run)
 
 
 if __name__ == "__main__":

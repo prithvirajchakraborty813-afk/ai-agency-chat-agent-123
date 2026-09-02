@@ -4,22 +4,29 @@ webhook_receiver.py — Step 1 of Agent #7: just prove that incoming
 WhatsApp replies actually reach your machine in real time.
 
 This does NOT reply to anyone yet, and does NOT call Gemini yet. It
-only listens for what Whapi.Cloud sends, prints it, and saves it to
+only listens for what WAHA sends, prints it, and saves it to
 incoming_log.json — so you can see with your own eyes that a real
 message from a real phone landed here, before we build anything on
 top of it.
 
 HOW TO RUN THIS:
-    1. In one terminal:  python webhook_receiver.py
+    1. Run WAHA itself (self-hosted, Docker):
+           docker run -it --rm -p 3000:3000 devlikeapro/waha
+       and scan the QR code at http://localhost:3000 to link your
+       WhatsApp number to a session (default session name: "default").
+    2. In one terminal:  python webhook_receiver.py
        (leaves it listening on http://localhost:5000)
-    2. In a second terminal:  ngrok http 5000
+    3. In a second terminal:  ngrok http 5000
        (gives you a public URL like https://abc123.ngrok-free.app)
-    3. In the Whapi.Cloud dashboard, under your channel's Webhooks
-       section, set the URL to:
-           https://abc123.ngrok-free.app/webhook
-       (use YOUR actual ngrok URL, and keep the /webhook path)
-    4. From a different phone, send a WhatsApp message to your number.
-    5. Watch this terminal — it should print the incoming message
+    4. Point WAHA's session webhook at that URL + /webhook, with the
+       "message" event enabled — either via WAHA's dashboard/session
+       config, or POST /api/sessions/ with:
+           {"name": "default", "config": {"webhooks": [
+               {"url": "https://abc123.ngrok-free.app/webhook",
+                "events": ["message"]}
+           ]}}
+    5. From a different phone, send a WhatsApp message to your number.
+    6. Watch this terminal — it should print the incoming message
        within a second or two.
 """
 
@@ -76,25 +83,18 @@ def webhook():
         "raw_payload": payload,
     })
 
-    # Whapi sends different event shapes. Handle both known ones:
-    # 1) "messages" — a direct incoming-message event
-    # 2) "chats_updates" — a chat-updated event that WRAPS the message
-    #    inside after_update.last_message
-    messages = payload.get("messages", [])
-    for msg in messages:
-        if msg.get("from_me"):
-            continue  # skip our own outgoing messages echoed back
-        from_number = msg.get("from", "unknown")
-        text = msg.get("text", {}).get("body", "")
-        print(f"\n>>> REAL REPLY (messages) from {from_number}: {text}\n")
-
-    for update in payload.get("chats_updates", []):
-        last_msg = (update.get("after_update") or {}).get("last_message") or {}
-        if not last_msg or last_msg.get("from_me"):
-            continue  # skip empty updates or our own outgoing echoes
-        from_number = last_msg.get("from", "unknown")
-        text = (last_msg.get("text") or {}).get("body", "")
-        print(f"\n>>> REAL REPLY (chats_updates) from {from_number}: {text}\n")
+    # WAHA sends one event per webhook POST, shaped as
+    # {"event": "message", "session": "...", "payload": {...}} — unlike
+    # Whapi's "messages" array. The actual message fields (from, body,
+    # fromMe) live on payload directly, and "from" is "<digits>@c.us"
+    # rather than a bare digit string.
+    if payload.get("event") == "message":
+        msg = payload.get("payload", {})
+        if not msg.get("fromMe"):
+            raw_from = msg.get("from", "unknown")
+            from_number = raw_from.split("@")[0] if raw_from else "unknown"
+            text = msg.get("body", "")
+            print(f"\n>>> REAL REPLY (message) from {from_number}: {text}\n")
 
     return jsonify({"status": "received"}), 200
 
@@ -106,5 +106,5 @@ def health():
 
 if __name__ == "__main__":
     print("Webhook receiver starting on http://localhost:5000")
-    print("Point ngrok at this port, then set the ngrok URL + /webhook in Whapi's dashboard.")
+    print("Point ngrok at this port, then set the ngrok URL + /webhook as your WAHA session's webhook (event: 'message').")
     app.run(host="0.0.0.0", port=5000)
