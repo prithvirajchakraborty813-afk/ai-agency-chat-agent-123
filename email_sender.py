@@ -231,16 +231,36 @@ def fetch_new_replies(gmail_address: str, gmail_app_password: str,
                 domain = sender_addr.split("@", 1)[1]
 
                 # Skip obvious automated/notification senders (newsletters,
-                # no-reply addresses from other services, etc). Without this,
-                # something like a YouTube notification landing as UNSEEN in
-                # the inbox gets treated as a real lead reply, and the chat
-                # engine tries to "negotiate" with it and email a reply back
-                # to an address that will never accept mail — which can hang
-                # the whole request until the server's worker timeout kills
-                # it (this exact failure mode happened with
-                # noreply@youtube.com and produced a bare, unexplained 500).
+                # platform notifications, no-reply addresses, etc). Without
+                # this, something like a YouTube or Facebook notification
+                # landing as UNSEEN in the inbox gets treated as a real lead
+                # reply, and the chat engine burns a Gemini call and tries to
+                # email a reply back to an address that will never accept
+                # mail — which can hang the whole request until the server's
+                # worker is killed (this exact failure mode happened first
+                # with noreply@youtube.com, then messages@facebookmail.com —
+                # a local-part-only check missed the second one, so this now
+                # also checks the domain).
                 local_part = sender_addr.split("@", 1)[0]
-                if local_part in ("noreply", "no-reply", "donotreply", "do-not-reply", "notifications", "mailer-daemon"):
+                NOREPLY_LOCAL_PARTS = (
+                    "noreply", "no-reply", "donotreply", "do-not-reply",
+                    "notifications", "notification", "mailer-daemon",
+                    "postmaster", "messages", "alert", "alerts", "updates",
+                )
+                # Domains of consumer platforms whose automated mail (likes,
+                # comments, notifications, digests) can land in any inbox
+                # and is never going to be a genuine business lead reply.
+                KNOWN_NOTIFICATION_DOMAINS = (
+                    "youtube.com", "facebookmail.com", "facebook.com",
+                    "instagram.com", "linkedin.com", "twitter.com", "x.com",
+                    "google.com", "accounts.google.com", "github.com",
+                    "slack.com", "notion.so", "calendly.com",
+                )
+                is_noreply_local = local_part in NOREPLY_LOCAL_PARTS
+                is_known_notification_domain = any(
+                    domain == d or domain.endswith("." + d) for d in KNOWN_NOTIFICATION_DOMAINS
+                )
+                if is_noreply_local or is_known_notification_domain:
                     print(f"[info] Skipping likely-automated sender: {sender_addr}", file=sys.stderr)
                     imap.store(msg_id, "+FLAGS", "\\Seen")
                     continue
