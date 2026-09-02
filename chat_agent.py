@@ -116,6 +116,12 @@ GCP_PROJECT = os.environ.get("GCP_PROJECT", "")
 OWNER_UPI_ID = os.environ.get("OWNER_UPI_ID", "")
 GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")  # where owner alerts go if OWNER_NOTIFY_CHANNEL=email
+# "whatsapp" (default) or "email" — a manual switch for when WhatsApp itself
+# is restricted/down and owner alerts need a channel that still works. Does
+# NOT change how leads are messaged, only where the *owner's* pings
+# ("Ready to propose", "Sent. Order X — awaiting payment", etc.) go.
+OWNER_NOTIFY_CHANNEL = os.environ.get("OWNER_NOTIFY_CHANNEL", "whatsapp").strip().lower()
 POLL_EMAIL_SECRET = os.environ.get("POLL_EMAIL_SECRET", "")  # shared secret so /poll-email can't be hit by randoms
 EMAIL_REPLY_SUBJECT = "Re: your message"
 
@@ -275,6 +281,22 @@ def _is_email_id(identifier: str) -> bool:
 
 
 def send_whatsapp(to_phone: str, text: str) -> bool:
+    # Owner-notify redirect: only fires for messages TO the owner, and only
+    # when OWNER_NOTIFY_CHANNEL=email is explicitly set (e.g. while
+    # WhatsApp itself is restricted). Lead-facing sends are never affected
+    # by this — a lead's own channel (WhatsApp vs email:<domain>) is
+    # decided separately, below, by their own identifier.
+    if to_phone == OWNER_PHONE and OWNER_NOTIFY_CHANNEL == "email":
+        if not OWNER_EMAIL:
+            print("[error] OWNER_NOTIFY_CHANNEL=email but OWNER_EMAIL is not set — cannot alert owner.", file=sys.stderr)
+            return False
+        ok, detail = email_sender.send_email(
+            GMAIL_ADDRESS, GMAIL_APP_PASSWORD, OWNER_EMAIL, "Agency update", text
+        )
+        if not ok:
+            print(f"[error] Failed to email owner alert: {detail}", file=sys.stderr)
+        return ok
+
     if _is_email_id(to_phone):
         convo = db_storage.load_conversation(to_phone)
         reply_to = (convo or {}).get("email_address", "")
@@ -1237,6 +1259,20 @@ def poll_email():
 
     processed = 0
     for sender_addr, domain, body in replies:
+        append_to_log({
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "raw_payload": {"channel": "email", "from": sender_addr, "domain": domain, "body": body},
+        })
+
+        # If OWNER_EMAIL replied, this is the owner sending APPROVE/SETPRICE
+        # by email (see OWNER_NOTIFY_CHANNEL) — route to the owner-command
+        # handler, not the lead-chat engine. Case-insensitive since email
+        # addresses are compared case-insensitively by convention.
+        if OWNER_EMAIL and sender_addr.strip().lower() == OWNER_EMAIL.strip().lower():
+            handle_owner_message(body)
+            processed += 1
+            continue
+
         convo_id = f"email:{domain}"
         # Matches a reply back to its lead by DOMAIN, not the exact sender
         # address — same limitation as the original send: this pipeline

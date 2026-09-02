@@ -90,3 +90,45 @@ subject/Message-ID — each reply is treated as a fresh message in that
 lead's ongoing conversation, same as a WhatsApp text. If you want true
 email-thread awareness (quoting, subject-line matching) later, that's
 a bigger separate change, not what's built here.
+
+## Owner alerts over email (for when WhatsApp itself is down/restricted)
+
+Every "Ready to propose" ping, order confirmation, and reply to your
+own `APPROVE`/`SETPRICE` commands normally goes to your own WhatsApp
+(`OWNER_PHONE`). If your WhatsApp number gets restricted — which is a
+real risk with WAHA's unofficial automation, see the earlier WhatsApp
+discussion — you can switch owner alerts to email instead, without
+touching how leads themselves are messaged.
+
+### Setup
+
+Add two more env vars, on Render (same service as `chat_agent.py`):
+```
+OWNER_EMAIL=your-real-inbox@example.com
+OWNER_NOTIFY_CHANNEL=email
+```
+Leave `OWNER_NOTIFY_CHANNEL` unset (or set to `whatsapp`, the default)
+to go back to WhatsApp once your number is healthy again — this is a
+manual switch, not automatic failover, since a temporary WAHA API
+error and an actual restriction look identical from inside the code
+and shouldn't silently swap channels on their own.
+
+### How it works
+
+- Every owner ping (`send_whatsapp(OWNER_PHONE, ...)` calls, unchanged
+  everywhere else in the file) gets redirected to an email to
+  `OWNER_EMAIL` instead, when the switch is on.
+- You reply to that email the same way you'd reply on WhatsApp —
+  `APPROVE <phone>`, `SETPRICE <phone> <amount>` — as the email body.
+  `/poll-email` recognizes a reply from `OWNER_EMAIL` specifically and
+  routes it to the owner-command handler instead of the lead-chat
+  engine, so this only works once **the daily poll runs** — it is
+  not instant like WhatsApp. If an approval is urgent, this isn't a
+  substitute for a working WhatsApp number, just a way to not be
+  fully blind while it's restricted.
+- Use `OWNER_EMAIL`, not `GMAIL_ADDRESS`, for your own inbox if
+  they're different accounts — `GMAIL_ADDRESS` is the account that
+  *sends and polls*, `OWNER_EMAIL` is the address alerts land on and
+  the address `/poll-email` treats as "the owner, not a lead". They
+  can be the same address if you want to send from and read alerts
+  in one inbox.
