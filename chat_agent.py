@@ -1282,10 +1282,6 @@ def poll_email():
         # domain email in, they share one conversation — an accepted
         # tradeoff given the alternative is no email channel at all.
         get_or_create_conversation(convo_id, email_address=sender_addr)
-        append_to_log({
-            "received_at": datetime.now(timezone.utc).isoformat(),
-            "raw_payload": {"channel": "email", "from": sender_addr, "domain": domain, "body": body},
-        })
 
         convo = get_or_create_conversation(convo_id)
         stage = convo.get("stage", "warming_up")
