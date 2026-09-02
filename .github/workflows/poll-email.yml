@@ -34,6 +34,7 @@ jobs:
           RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
           POLL_EMAIL_SECRET: ${{ secrets.POLL_EMAIL_SECRET }}
         run: |
-          curl -sf -X POST "$RENDER_APP_URL/poll-email" \
+          curl -s -X POST "$RENDER_APP_URL/poll-email" \
             -H "X-Poll-Secret: $POLL_EMAIL_SECRET" \
-            --max-time 60
+            --max-time 60 \
+            -w "\nHTTP Status: %{http_code}\n"
