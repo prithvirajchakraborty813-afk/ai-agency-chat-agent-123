@@ -295,7 +295,7 @@ def send_whatsapp(to_phone: str, text: str) -> bool:
     # Owner-notify redirect: only fires for messages TO the owner, and only
     # when OWNER_NOTIFY_CHANNEL=email is explicitly set (e.g. while
     # WhatsApp itself is restricted). Lead-facing sends are never affected
-    # by this — a lead's own channel (WhatsApp vs email:<domain>) is
+    # by this — a lead's own channel (WhatsApp vs email:<address>) is
     # decided separately, below, by their own identifier.
     if to_phone == OWNER_PHONE and OWNER_NOTIFY_CHANNEL == "email":
         if not OWNER_EMAIL:
@@ -492,8 +492,8 @@ def _save_conversations(conversations: dict) -> None:
 
 def get_or_create_conversation(phone: str, email_address: str = "") -> dict:
     """`phone` is the conversation's identifier — a plain digit string for
-    WhatsApp leads, or "email:<domain>" for email leads (see send_whatsapp
-    above). email_address is only used the first time an email:<domain>
+    WhatsApp leads, or "email:<address>" for email leads (see send_whatsapp
+    above). email_address is only used the first time an email:<address>
     conversation is created, to remember the real reply-to address (the
     domain alone isn't enough to send a reply to)."""
     with _state_lock:
@@ -1191,7 +1191,7 @@ def handle_owner_message(text: str) -> None:
         the lead is found automatically instead of typed: this only works
         when replying to the specific "Ready to propose" notification
         email for that lead (via Reply, not a fresh message), since the
-        lead's own identifier (phone number or "email:domain") is
+        lead's own identifier (phone number or "email:<address>") is
         recovered from that notification's quoted text — see
         _find_lead_id_in_text below. Over WhatsApp, where there's no
         quoting, use the explicit "APPROVE <lead_phone>" form instead.
@@ -1232,7 +1232,7 @@ def handle_owner_message(text: str) -> None:
         # "APPROVE PROPOSAL" — find which lead this is via the quoted
         # notification text rather than a typed phone number. The
         # "Ready to propose" alert always contains either a bare phone
-        # number (WhatsApp leads) or "email:<domain>" (email leads) in
+        # number (WhatsApp leads) or "email:<address>" (email leads) in
         # its own body, so the same pattern that appears when the owner
         # composes fresh also appears when Gmail quotes that alert back.
         lead_id = _find_lead_id_in_text(raw_text)
@@ -1316,12 +1316,14 @@ def _find_order_id_in_text(text: str) -> str:
 
 def _find_lead_id_in_text(text: str) -> str:
     """Returns the first lead identifier (bare phone number, or
-    "email:<domain>") found anywhere in text — same full-text/quoted-
+    "email:<address>") found anywhere in text — same full-text/quoted-
     history search as _find_order_id_in_text, and for the same reason.
-    Checks "email:<domain>" first since a bare phone-number pattern could
+    Checks "email:<address>" first since a bare phone-number pattern could
     otherwise false-match digits inside an unrelated context; returns ""
-    if neither is found."""
-    email_match = re.search(r"\bemail:[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", text)
+    if neither is found. Matches a full address (e.g.
+    "email:someone@gmail.com"), not just a bare domain — convo_id switched
+    from domain-keyed to address-keyed, see run_email_poll_once."""
+    email_match = re.search(r"\bemail:[a-zA-Z0-9.@-]+\.[a-zA-Z]{2,}\b", text)
     if email_match:
         return email_match.group(0)
     phone_match = re.search(r"\b\d{10,15}\b", text)
@@ -1606,14 +1608,15 @@ def run_email_poll_once() -> dict:
                 processed += 1
                 continue
 
-            convo_id = f"email:{domain}"
-            # Matches a reply back to its lead by DOMAIN, not the exact sender
-            # address — same limitation as the original send: this pipeline
-            # never captured a real per-lead email, only a guessed info@/
-            # contact@ address, so "someone at this domain replied" is the
-            # best available match. If two different people at the same
-            # domain email in, they share one conversation — an accepted
-            # tradeoff given the alternative is no email channel at all.
+            # Matches a reply back to its lead by the exact sender address
+            # (not domain — was f"email:{domain}" before, which meant every
+            # personal @gmail.com sender shared ONE conversation thread
+            # server-side; whichever sender's message was processed last was
+            # who the bot actually addressed, so it looked like "keeps
+            # messaging one lead" when testing with multiple addresses).
+            # Normalized to lowercase since email addresses are compared
+            # case-insensitively by convention.
+            convo_id = f"email:{sender_addr.strip().lower()}"
             get_or_create_conversation(convo_id, email_address=sender_addr)
 
             convo = get_or_create_conversation(convo_id)
