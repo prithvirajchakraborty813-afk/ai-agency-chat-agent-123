@@ -16,12 +16,25 @@ variables instead, so you edit them in Render's dashboard, never in code:
     COUNT_PER_CITY     businesses per city anchor (default 8)
     PRODUCT_NAME       your product name, for the qualifier/proposal steps
     PRODUCT_PITCH      one-line pitch of what it does / solves
-    WAHA_BASE_URL      base URL of your self-hosted WAHA instance (also
-                        used by send_proposals.py)
-    WAHA_SESSION       WAHA session name, default "default"
-    WAHA_API_KEY       WAHA X-Api-Key, if set (optional)
+    GMAIL_ADDRESS      Gmail address used both to send lead outreach
+                        (PRIMARY_CHANNEL=email, see send_proposals.py) and
+                        owner failure alerts (this file) — required in the
+                        current email-only setup
+    GMAIL_APP_PASSWORD Gmail App Password for the above (NOT your normal
+                        password — see email_sender.py / GMAIL_SETUP.md)
+    OWNER_EMAIL        your own email — where failure notifications go
+                        while WhatsApp is parked (see notify_owner() below)
+    WAHA_BASE_URL      base URL of your self-hosted WAHA instance — PARKED,
+                        not required right now (send_proposals.py's
+                        PRIMARY_CHANNEL defaults to "email", which never
+                        touches WAHA). Needed again once PRIMARY_CHANNEL is
+                        switched back to "whatsapp".
+    WAHA_SESSION       WAHA session name, default "default" (parked, see above)
+    WAHA_API_KEY       WAHA X-Api-Key, if set (optional, parked, see above)
     OWNER_PHONE        your own WhatsApp number, digits only, country code
-                        included — where failure notifications go
+                        included — PARKED alongside WAHA_BASE_URL above;
+                        not used for owner alerts while WhatsApp is parked,
+                        kept here so flipping back later is a one-line change
     DATABASE_URL       Postgres connection string (already required by
                         db_storage.py / chat_agent.py)
 
@@ -42,12 +55,29 @@ import sys
 
 import requests
 
+import email_sender
+
 WAHA_BASE_URL = os.environ.get("WAHA_BASE_URL", "http://localhost:3000").rstrip("/")
 WAHA_SESSION = os.environ.get("WAHA_SESSION", "default")
 WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
+
+# "email" (default) or "whatsapp" — which channel owner failure-alerts go
+# out on. Independent of send_proposals.py's PRIMARY_CHANNEL (that one
+# controls how LEADS are contacted; this controls how the OWNER is
+# notified when a pipeline step fails) but set to match it for now since
+# WhatsApp is parked pending a PAN. Flip to "whatsapp" to restore the
+# original behavior — the WhatsApp-send code below is untouched, just
+# gated behind this same pattern used in send_proposals.py.
+OWNER_ALERT_CHANNEL = os.environ.get("OWNER_ALERT_CHANNEL", "email").strip().lower()
 
 
-def notify_owner(message: str) -> None:
+def _notify_owner_whatsapp(message: str) -> None:
+    """PARKED — not called while OWNER_ALERT_CHANNEL=email, but left fully
+    intact so switching back to WhatsApp needs no rewriting, just flipping
+    OWNER_ALERT_CHANNEL back to "whatsapp"."""
     owner = os.environ.get("OWNER_PHONE")
     if not WAHA_BASE_URL or not owner:
         print(f"[owner notify skipped — WAHA_BASE_URL/OWNER_PHONE not set] {message}", file=sys.stderr)
@@ -64,6 +94,25 @@ def notify_owner(message: str) -> None:
         )
     except requests.RequestException as e:
         print(f"[owner notify FAILED: {e}] {message}", file=sys.stderr)
+
+
+def _notify_owner_email(message: str) -> None:
+    if not OWNER_EMAIL:
+        print(f"[owner notify skipped — OWNER_EMAIL not set] {message}", file=sys.stderr)
+        return
+    ok, detail = email_sender.send_email(
+        GMAIL_ADDRESS, GMAIL_APP_PASSWORD, OWNER_EMAIL,
+        subject="Daily lead pipeline alert", body=message,
+    )
+    if not ok:
+        print(f"[owner notify FAILED: {detail}] {message}", file=sys.stderr)
+
+
+def notify_owner(message: str) -> None:
+    if OWNER_ALERT_CHANNEL == "whatsapp":
+        _notify_owner_whatsapp(message)
+    else:
+        _notify_owner_email(message)
 
 
 def run_step(label: str, cmd: list[str]) -> bool:
@@ -90,7 +139,11 @@ def require_env(*names: str) -> None:
 
 
 def main() -> None:
-    require_env("GCP_PROJECT", "LEAD_DESCRIPTION", "PRODUCT_NAME", "PRODUCT_PITCH", "WAHA_BASE_URL")
+    # WAHA_BASE_URL deliberately NOT required here — it's only needed once
+    # send_proposals.py's PRIMARY_CHANNEL is switched back to "whatsapp".
+    # In the current email-only default, requiring it would block a
+    # correctly-configured pipeline for no reason.
+    require_env("GCP_PROJECT", "LEAD_DESCRIPTION", "PRODUCT_NAME", "PRODUCT_PITCH")
 
     project = os.environ["GCP_PROJECT"]
     description = os.environ["LEAD_DESCRIPTION"]

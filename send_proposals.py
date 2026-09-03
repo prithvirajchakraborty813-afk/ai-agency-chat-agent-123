@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
 send_proposals.py — sends the real proposal_text from proposals.csv to
-each lead's WhatsApp, via a self-hosted WAHA instance (uses your own
-linked number, no message-volume cap unlike Whapi.Cloud's free tier).
+each lead, over email or WhatsApp depending on PRIMARY_CHANNEL (see that
+constant below). Currently EMAIL-ONLY by default (PRIMARY_CHANNEL=email):
+every lead is emailed via Gmail/Brevo, using a guessed info@/contact@
+address from their `domain` value — see email_sender.py's module
+docstring for the important limitation (it's a guessed address, not a
+real captured email; expect a meaningfully lower hit rate than a direct
+channel). Leads with no `domain` on file get no send at all in this mode
+— a phone number alone isn't enough, since WhatsApp isn't used.
 
-EMAIL FALLBACK: if a lead has no phone number on file, or the WhatsApp
-send fails, and the lead has a `domain` value, this now also tries
-Gmail as a fallback — see email_sender.py's module docstring for the
-important limitation (it's a guessed info@/contact@ address, not a
-real captured email; expect a meaningfully lower hit rate than
-WhatsApp). Set GMAIL_ADDRESS and GMAIL_APP_PASSWORD to enable it;
-leave them unset and this script behaves exactly as before,
-WhatsApp-only.
+WHATSAPP (parked, not removed): the original WhatsApp send path — via a
+self-hosted WAHA instance, your own linked number, no message-volume cap
+unlike Whapi.Cloud's free tier — is still fully implemented below
+(send_message(), normalize_phone(), pacing, dedup) but is not called
+while PRIMARY_CHANNEL=email. This is intentional: it's a working, tested
+pipeline that's waiting on a PAN (business verification) before it can
+be primary again. Set PRIMARY_CHANNEL=whatsapp (env var) to switch back
+— WhatsApp becomes primary again with email as its fallback (original
+behavior), no other code changes needed.
 
 WHY PACED, NOT ALL AT ONCE: sending 10 messages back-to-back looks
 robotic and is exactly the pattern WhatsApp's spam detection watches
@@ -56,6 +63,27 @@ import requests
 
 import db_storage
 import email_sender
+
+# ---------------------------------------------------------------------------
+# PRIMARY_CHANNEL — single switch controlling which channel actually sends.
+#
+# "email"    (current default): email-only. WhatsApp is fully wired and
+#            tested below (send_message(), normalize_phone(), the WAHA
+#            call) but is never invoked — every lead goes out over email,
+#            using the same guessed info@/contact@ address logic
+#            email_sender.py already has. No phone number is used or
+#            required for a send to happen.
+# "whatsapp": the original behavior — WhatsApp first, email only as a
+#            fallback when there's no phone or the WhatsApp send fails.
+#
+# WHY A TOGGLE AND NOT A DELETE: WhatsApp send is a working, tested
+# pipeline (WAHA integration, phone normalization, pacing) — it's parked,
+# not gone, until a PAN is available and WhatsApp becomes primary. When
+# that day comes, flip this one line back to "whatsapp" — nothing else
+# in this file needs to change, no code needs to be rewritten or
+# un-commented line by line.
+# ---------------------------------------------------------------------------
+PRIMARY_CHANNEL = os.environ.get("PRIMARY_CHANNEL", "email").strip().lower()
 
 
 def normalize_phone(raw: str) -> str | None:
@@ -136,14 +164,23 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
         to = normalize_phone(raw_phone)
         e_key = _email_key(domain)
 
-        can_try_whatsapp = bool(to) and to not in already_sent
-        can_try_email = email_fallback and bool(e_key) and e_key not in already_sent
+        # PRIMARY_CHANNEL == "email": WhatsApp is never attempted, so
+        # can_try_whatsapp stays False regardless of whether a phone
+        # number is on file — see the PRIMARY_CHANNEL comment near the
+        # top of this file for how to flip this back.
+        can_try_whatsapp = (PRIMARY_CHANNEL == "whatsapp") and bool(to) and to not in already_sent
+        can_try_email = bool(e_key) and e_key not in already_sent
+        if PRIMARY_CHANNEL == "whatsapp":
+            can_try_email = email_fallback and can_try_email
 
         if not can_try_whatsapp and not can_try_email:
-            reason = "already sent on every available channel" if (to or e_key) else "no phone or domain on file"
+            if PRIMARY_CHANNEL == "email":
+                reason = "already emailed" if e_key else "no domain on file (email-only mode — phone number, if any, isn't used)"
+            else:
+                reason = "already sent on every available channel" if (to or e_key) else "no phone or domain on file"
             print(f"  [{i}/{len(rows)}] {name:40s} -> SKIPPED ({reason})")
             log_writer.writerow({"name": name, "phone": raw_phone, "channel": "", "status": "skipped", "detail": reason})
-            if to or e_key:
+            if (PRIMARY_CHANNEL == "email" and e_key) or (PRIMARY_CHANNEL == "whatsapp" and (to or e_key)):
                 skipped_already += 1
             else:
                 skipped_no_channel += 1
@@ -159,6 +196,11 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
 
         sent_ok = False
 
+        # WhatsApp send — parked behind PRIMARY_CHANNEL, not deleted. This
+        # block is fully working code (WAHA call, logging, dedup) and only
+        # runs at all when PRIMARY_CHANNEL="whatsapp"; can_try_whatsapp is
+        # unconditionally False otherwise, so this whole branch is a no-op
+        # in email-only mode without needing to comment out its body.
         if can_try_whatsapp:
             ok, detail = send_message(waha_url, session, api_key, to, proposal_text)
             if ok:
@@ -208,10 +250,10 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Send real proposal_text to leads in proposals.csv via a self-hosted WAHA instance, with an optional Gmail fallback.")
+    parser = argparse.ArgumentParser(description="Send real proposal_text to leads in proposals.csv over email (default) or WhatsApp — see PRIMARY_CHANNEL.")
     parser.add_argument("--in", dest="in_csv", default="proposals.csv")
     parser.add_argument("--waha-url", dest="waha_url", default=os.environ.get("WAHA_BASE_URL", "http://localhost:3000"),
-                         help="Base URL of your WAHA instance (or set WAHA_BASE_URL env var)")
+                         help="Base URL of your WAHA instance — only needed if PRIMARY_CHANNEL=whatsapp (or set WAHA_BASE_URL env var)")
     parser.add_argument("--waha-session", dest="waha_session", default=os.environ.get("WAHA_SESSION", "default"),
                          help="WAHA session name (or set WAHA_SESSION env var)")
     parser.add_argument("--waha-key", dest="waha_key", default=os.environ.get("WAHA_API_KEY", ""),
@@ -221,20 +263,32 @@ def main() -> None:
     parser.add_argument("--log", default="sent_log.csv")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be sent without sending")
     parser.add_argument("--no-email-fallback", dest="email_fallback", action="store_false",
-                         help="Disable the Gmail fallback even if GMAIL_ADDRESS/GMAIL_APP_PASSWORD are set")
+                         help="When PRIMARY_CHANNEL=whatsapp: disable the Gmail fallback even if GMAIL_ADDRESS/GMAIL_APP_PASSWORD are set. Has no effect in email-only mode (email isn't a 'fallback' there, it's the only channel).")
     parser.add_argument("--gmail-address", default=os.environ.get("GMAIL_ADDRESS", ""),
-                         help="Gmail address to send fallback emails from (or set GMAIL_ADDRESS env var)")
+                         help="Gmail address to send from (or set GMAIL_ADDRESS env var)")
     parser.add_argument("--gmail-app-password", default=os.environ.get("GMAIL_APP_PASSWORD", ""),
                          help="Gmail App Password, NOT your normal password (or set GMAIL_APP_PASSWORD env var)")
     parser.set_defaults(email_fallback=True)
     args = parser.parse_args()
 
-    if not args.dry_run and not args.waha_url:
-        parser.error("Missing --waha-url (or set the WAHA_BASE_URL environment variable).")
+    # --waha-url is only required when WhatsApp is actually going to be
+    # used — in email-only mode (the default) nothing in this script ever
+    # touches WAHA, so requiring its URL would block a working config for
+    # no reason.
+    if not args.dry_run and PRIMARY_CHANNEL == "whatsapp" and not args.waha_url:
+        parser.error("Missing --waha-url (or set the WAHA_BASE_URL environment variable) — required when PRIMARY_CHANNEL=whatsapp.")
 
-    email_fallback = args.email_fallback and bool(args.gmail_address) and bool(args.gmail_app_password)
-    if args.email_fallback and not email_fallback and not args.dry_run:
-        print("[info] Gmail fallback disabled — GMAIL_ADDRESS/GMAIL_APP_PASSWORD not both set.", file=sys.stderr)
+    if PRIMARY_CHANNEL == "email":
+        # Email is the only channel in this mode, not a fallback — always
+        # attempted (per-lead skips still apply: no domain, or already
+        # sent). --no-email-fallback intentionally has no effect here.
+        email_fallback = True
+        if not args.gmail_address or not args.gmail_app_password:
+            print("[warning] GMAIL_ADDRESS/GMAIL_APP_PASSWORD not both set — PRIMARY_CHANNEL=email but sends will fail until these are set.", file=sys.stderr)
+    else:
+        email_fallback = args.email_fallback and bool(args.gmail_address) and bool(args.gmail_app_password)
+        if args.email_fallback and not email_fallback and not args.dry_run:
+            print("[info] Gmail fallback disabled — GMAIL_ADDRESS/GMAIL_APP_PASSWORD not both set.", file=sys.stderr)
 
     run(args.in_csv, args.waha_url, args.waha_session, args.waha_key,
         args.min_delay, args.max_delay, args.log, args.dry_run,
