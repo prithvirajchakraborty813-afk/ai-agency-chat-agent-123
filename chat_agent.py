@@ -86,6 +86,7 @@ from flask import Flask, request, jsonify
 import order_contract
 import db_storage
 import email_sender
+import inbox
 
 # ---------------------------------------------------------------------------
 # Vertex AI auth on Render — Render has no gcloud CLI and no attached
@@ -175,6 +176,7 @@ LOG_PATH = "incoming_log.json"  # unused now — see above
 _state_lock = threading.Lock()
 
 app = Flask(__name__)
+app.register_blueprint(inbox.inbox_bp)
 
 
 def _startup_checks() -> None:
@@ -439,6 +441,8 @@ def detect_escalation_request(text: str) -> bool:
 
 def handle_escalation(phone: str, text: str) -> None:
     convo = get_or_create_conversation(phone)
+    if convo.get("human_takeover"):
+        return  # see handle_lead_message — owner has this one manually
     already_flagged = convo.get("escalation_flagged", False)
 
     if not already_flagged:
@@ -811,6 +815,8 @@ def handle_post_lock_message(phone: str, text: str, stage: str) -> None:
     locked terms, but now actually reads what the lead said instead of
     echoing an identical string regardless of content."""
     convo = get_or_create_conversation(phone)
+    if convo.get("human_takeover"):
+        return  # see handle_lead_message — owner has this one manually
 
     if detect_reconsideration(text) and convo.get("cancellation_flagged", False):
         send_whatsapp(
@@ -944,6 +950,14 @@ def match_selected_tier(text: str, tiers: dict) -> Optional[str]:
 def handle_lead_message(phone: str, text: str) -> None:
     append_history(phone, "lead", text)
     convo = get_or_create_conversation(phone)
+    if convo.get("human_takeover"):
+        # Owner is manually driving this conversation from the inbox UI —
+        # stay silent so the bot can't talk over a human mid-correction.
+        # The lead's message is already logged above; it'll be sitting
+        # right there in the inbox thread for the owner to see and reply
+        # to by hand. Resuming (inbox "Resume bot" button) re-enables
+        # auto-replies from the next message onward.
+        return
     stage = convo["stage"]
     tiers = load_tiers()
 
