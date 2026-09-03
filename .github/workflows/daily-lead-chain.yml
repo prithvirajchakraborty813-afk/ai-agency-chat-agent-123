@@ -43,6 +43,7 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          SEND_FROM_EMAIL: ${{ secrets.SEND_FROM_EMAIL }}
         run: python run_daily_chain.py
 
       # Email polling moved out to its own workflow — see
