@@ -1376,28 +1376,24 @@ def webhook():
     return jsonify({"status": "received"}), 200
 
 
-@app.route("/poll-email", methods=["POST"])
-def poll_email():
+def run_email_poll_once() -> dict:
     """Checks the Gmail inbox once for new replies and feeds each one into
     the same handle_lead_message() the WhatsApp webhook uses — a lead who
     replies over email gets the identical stage machine, Gemini prompts,
     catalog, escalation detection, and owner-approval flow as a WhatsApp
-    lead. Meant to be called once per day by the GitHub Actions daily
-    chain (not polled continuously), since email doesn't need the
-    near-real-time responsiveness WhatsApp does.
+    lead.
 
-    Protected by a shared secret (POLL_EMAIL_SECRET) in the X-Poll-Secret
-    header, since this route triggers real outbound Gemini calls and
-    replies — it shouldn't be callable by anyone who finds the URL.
+    This is the actual polling logic, extracted out of the old /poll-email
+    route so it can be called two ways: (1) from the background thread
+    below, on a timer, so replies go out within a couple minutes without
+    anyone triggering anything by hand, and (2) still from /poll-email
+    itself, kept as a manual/debug trigger — hitting it by hand (or from
+    GitHub Actions) still works exactly as before, it just isn't the
+    primary way replies get sent anymore.
     """
-    if POLL_EMAIL_SECRET:
-        if request.headers.get("X-Poll-Secret", "") != POLL_EMAIL_SECRET:
-            return jsonify({"status": "error", "detail": "bad or missing X-Poll-Secret"}), 401
-    else:
-        print("[warning] POLL_EMAIL_SECRET not set — /poll-email is callable by anyone with the URL.")
-
     replies = email_sender.fetch_new_replies(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-    print(f"[info] /poll-email: {len(replies)} new email reply(ies) found.")
+    if replies:
+        print(f"[info] email poll: {len(replies)} new email reply(ies) found.")
 
     processed = 0
     errors = 0
@@ -1444,21 +1440,106 @@ def poll_email():
             # the caller's log. Now it's logged with a full traceback in
             # Render's own logs and the loop moves on to the next reply.
             errors += 1
-            print(f"[error] /poll-email: failed processing reply from {sender_addr!r}: {e}", file=sys.stderr)
+            print(f"[error] email poll: failed processing reply from {sender_addr!r}: {e}", file=sys.stderr)
             traceback.print_exc()
 
-    return jsonify({
-        "status": "ok",
-        "replies_found": len(replies),
-        "processed": processed,
-        "errors": errors,
-    }), 200
+    return {"replies_found": len(replies), "processed": processed, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Background email poll loop — replaces relying on an external cron hitting
+# /poll-email as the ONLY thing that checks Gmail. That meant replies could
+# sit for up to 3 hours (the old GitHub Actions schedule) unless someone
+# manually triggered the workflow. This runs inside the same process as the
+# Flask app and calls run_email_poll_once() on its own timer, so a reply
+# gets picked up within EMAIL_POLL_INTERVAL_SECONDS of arriving — no
+# external trigger needed at all.
+#
+# This only helps while the Render process is actually awake. Render's free
+# tier spins a service down after ~15 min with no inbound HTTP traffic, and
+# a spun-down process runs no background threads, including this one. The
+# GitHub Actions workflow (poll-email.yml) has been repurposed to ping "/"
+# every few minutes — cheap HTTP traffic whose only job is keeping this
+# process alive so this loop keeps running. If you move to a paid Render
+# plan (no spin-down), that keep-alive ping becomes unnecessary, but it's
+# harmless to leave in either way.
+# ---------------------------------------------------------------------------
+EMAIL_POLL_INTERVAL_SECONDS = int(os.environ.get("EMAIL_POLL_INTERVAL_SECONDS", "120"))
+_email_poll_thread_started = False
+_email_poll_thread_lock = threading.Lock()
+
+
+def _email_poll_loop() -> None:
+    print(f"[info] Background email poll loop started — checking every {EMAIL_POLL_INTERVAL_SECONDS}s.")
+    while True:
+        try:
+            run_email_poll_once()
+        except Exception as e:
+            # Never let one bad poll cycle kill the loop — log and try
+            # again next interval rather than silently going dark forever.
+            print(f"[error] Background email poll loop: unexpected error: {e}", file=sys.stderr)
+            traceback.print_exc()
+        time.sleep(EMAIL_POLL_INTERVAL_SECONDS)
+
+
+def start_email_poll_loop_once() -> None:
+    """Starts the background poll thread exactly once per process, even if
+    called from multiple places (e.g. both _startup_checks() and a WSGI
+    server that imports the module more than once). Guarded by a lock since
+    gunicorn can technically import the module from more than one thread
+    during worker boot."""
+    global _email_poll_thread_started
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+        print("[warning] GMAIL_ADDRESS / GMAIL_APP_PASSWORD not set — background email poll loop not started.")
+        return
+    with _email_poll_thread_lock:
+        if _email_poll_thread_started:
+            return
+        thread = threading.Thread(target=_email_poll_loop, daemon=True)
+        thread.start()
+        _email_poll_thread_started = True
+
+
+@app.route("/poll-email", methods=["POST"])
+def poll_email():
+    """Manual/debug trigger — checks Gmail once, right now, on demand.
+    Kept for testing and as a fallback, but this is no longer the only
+    thing that checks Gmail: the background loop above (started at app
+    boot) already does this automatically every EMAIL_POLL_INTERVAL_SECONDS.
+
+    Protected by a shared secret (POLL_EMAIL_SECRET) in the X-Poll-Secret
+    header, since this route triggers real outbound Gemini calls and
+    replies — it shouldn't be callable by anyone who finds the URL.
+    """
+    if POLL_EMAIL_SECRET:
+        if request.headers.get("X-Poll-Secret", "") != POLL_EMAIL_SECRET:
+            return jsonify({"status": "error", "detail": "bad or missing X-Poll-Secret"}), 401
+    else:
+        print("[warning] POLL_EMAIL_SECRET not set — /poll-email is callable by anyone with the URL.")
+
+    result = run_email_poll_once()
+    print(f"[info] /poll-email (manual): {result['replies_found']} new email reply(ies) found.")
+    return jsonify({"status": "ok", **result}), 200
 
 
 @app.route("/", methods=["GET"])
 def health():
+    # Doubles as the keep-alive target for poll-email.yml on Render's free
+    # tier — see the background email poll loop comment above for why this
+    # route being hit regularly matters now, not just as a status check.
     return "Chat agent is running.", 200
 
+
+# Starts the background email poll loop at import time, unconditionally —
+# this runs both when gunicorn imports chat_agent:app (the actual Render
+# production path) and when this file is run directly below. Deliberately
+# placed here at module bottom (rather than inside _startup_checks(), which
+# runs near the top of the file) because start_email_poll_loop_once() is
+# defined further up but after _startup_checks() already executes — putting
+# the call here, after every name in the module is defined, avoids a
+# NameError while still guaranteeing it runs exactly once per process
+# regardless of which path (gunicorn or direct run) started it.
+start_email_poll_loop_once()
 
 if __name__ == "__main__":
     # All startup checks + init_db() already ran above at import time
