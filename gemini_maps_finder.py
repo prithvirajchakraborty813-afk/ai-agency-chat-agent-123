@@ -110,6 +110,16 @@ def _synthetic_key(name: str, location: str) -> str:
 # would otherwise pass merge_prospects.py's domain-dedup as if it were a
 # real, shared domain and silently drop real leads.
 _DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", re.IGNORECASE)
+
+
+def _looks_like_email(v: str) -> bool:
+    """Basic shape check only — catches explanatory text or malformed
+    output ('not listed', 'N/A', etc.) that isn't a real email address.
+    Does NOT verify the address actually exists or is genuinely real —
+    that's on the model following the 'don't guess' instruction, this is
+    just a shape sanity check."""
+    return bool(_EMAIL_RE.match((v or "").strip()))
 
 
 def _looks_like_domain(value: str) -> bool:
@@ -130,6 +140,7 @@ class FoundCompany:
     address: str = ""
     category: str = ""
     phone: str = ""
+    email: str = ""
 
 
 EXTRACTION_SCHEMA = {
@@ -143,11 +154,12 @@ EXTRACTION_SCHEMA = {
                     "name": {"type": "STRING"},
                     "domain": {"type": "STRING", "description": "website domain, no https://, e.g. example.com — empty string if genuinely none listed"},
                     "phone": {"type": "STRING", "description": "phone number exactly as listed on Google Maps, empty string if genuinely none listed — do not guess or reformat"},
+                    "email": {"type": "STRING", "description": "email address exactly as listed on Google Maps or the business's own website, empty string if genuinely none listed — do not guess, construct, or infer one from the domain"},
                     "address": {"type": "STRING"},
                     "category": {"type": "STRING"},
                     "reasoning": {"type": "STRING", "description": "1 sentence on why this business fits the criteria"},
                 },
-                "required": ["name", "domain", "phone", "address", "reasoning"],
+                "required": ["name", "domain", "phone", "email", "address", "reasoning"],
             },
         }
     },
@@ -209,8 +221,11 @@ class VertexGeminiClient:
             "For each business, state its name, its website (if listed — leave blank "
             "if Maps genuinely has no website for it, do not guess one), its phone "
             "number exactly as shown on its Google Maps listing (leave blank if none "
-            "listed — do not guess or construct one), its address, its category, and "
-            "one sentence on why it matches.\n\n"
+            "listed — do not guess or construct one), its email address if one is "
+            "genuinely listed on its Maps profile or its own website (leave blank if "
+            "none listed — do NOT construct one like info@ or contact@ from the "
+            "domain, that is a fabrication, not a real finding), its address, its "
+            "category, and one sentence on why it matches.\n\n"
             "CRITICAL RULE, NON-NEGOTIABLE: every business you list must be a real "
             "listing you found via Google Maps grounding — never invent, guess, or "
             f"fabricate one. If you cannot find {count} real matches in this area, "
@@ -281,6 +296,10 @@ class VertexGeminiClient:
                 # an unrelated business with the same explanatory text.
                 junk_domain_count += 1
                 domain_out = ""
+            email_out = (c.get("email") or "").strip()
+            if email_out and not _looks_like_email(email_out):
+                email_out = ""
+
             real_candidates.append(FoundCompany(
                 name=name,
                 domain=domain_out,
@@ -288,6 +307,7 @@ class VertexGeminiClient:
                 address=c.get("address", ""),
                 category=c.get("category", ""),
                 phone=c.get("phone", ""),
+                email=email_out,
                 reasoning=c.get("reasoning", ""),
             ))
 
@@ -349,13 +369,16 @@ def run(out_csv: str, project: str, description: str, count_per_city: int,
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        # Same column shape as icp_finder.py / gemini_search_finder.py's prospects.csv
-        # so downstream scripts work unmodified.
-        writer.writerow(["name", "domain", "phone", "fit_score", "industry", "employee_count",
-                          "location", "matched_signals", "source_url"])
+        # Same column shape as icp_finder.py / gemini_search_finder.py's prospects.csv,
+        # plus "email" (added this session, see gemini_search_finder.py's matching
+        # empty column and merge_prospects.py's column-union for why this is safe
+        # to add without breaking anything downstream) so downstream scripts work
+        # with a real captured email, not just a guessed one.
+        writer.writerow(["name", "domain", "phone", "email", "fit_score", "industry",
+                          "employee_count", "location", "matched_signals", "source_url"])
         for c in all_companies:
             domain_out = c.domain.strip() if c.domain.strip() else _synthetic_key(c.name, c.location)
-            writer.writerow([c.name, domain_out, c.phone, "", c.category, "", c.location, c.reasoning, ""])
+            writer.writerow([c.name, domain_out, c.phone, c.email, "", c.category, "", c.location, c.reasoning, ""])
 
     return all_companies
 

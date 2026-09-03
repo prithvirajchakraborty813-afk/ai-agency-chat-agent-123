@@ -61,6 +61,7 @@ class Proposal:
     name: str
     domain: str
     phone: str
+    email: str
     recommended_tier: str
     setup_price: str
     monthly_price: str
@@ -221,6 +222,7 @@ Available tiers:
         name=row.get("name", ""),
         domain=row.get("domain", ""),
         phone=row.get("phone", ""),
+        email=row.get("email", ""),
         recommended_tier=tier_info["label"],
         setup_price=tier_info["setup_price"],
         monthly_price=tier_info["monthly_price"],
@@ -235,9 +237,9 @@ def write_xlsx(proposals: list[Proposal], out_xlsx: str) -> None:
     proposal text), wrapped text so rows aren't one giant unreadable line,
     a bold frozen header, and light banding so rows are easy to track
     across the wide columns."""
-    headers = ["Business Name", "Domain", "Phone", "Recommended Tier", "Setup Price",
+    headers = ["Business Name", "Domain", "Phone", "Email", "Recommended Tier", "Setup Price",
                "Monthly Price", "Why This Tier", "Proposal Text (ready to send)"]
-    widths = [26, 20, 16, 16, 22, 20, 45, 70]
+    widths = [26, 20, 16, 22, 16, 22, 20, 45, 70]
 
     wb = Workbook()
     ws = wb.active
@@ -259,7 +261,7 @@ def write_xlsx(proposals: list[Proposal], out_xlsx: str) -> None:
     ws.row_dimensions[1].height = 30
 
     for i, p in enumerate(proposals, start=2):
-        values = [p.name, p.domain, p.phone, p.recommended_tier, p.setup_price,
+        values = [p.name, p.domain, p.phone, p.email, p.recommended_tier, p.setup_price,
                   p.monthly_price, p.reasoning, p.proposal_text]
         for col, v in enumerate(values, 1):
             cell = ws.cell(row=i, column=col, value=v)
@@ -327,10 +329,10 @@ def run(in_csv: str, out_csv: str, tiers_path: str, project: str,
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["name", "domain", "phone", "recommended_tier", "setup_price",
+        writer.writerow(["name", "domain", "phone", "email", "recommended_tier", "setup_price",
                           "monthly_price", "reasoning", "proposal_text"])
         for p in proposals:
-            writer.writerow([p.name, p.domain, p.phone, p.recommended_tier, p.setup_price,
+            writer.writerow([p.name, p.domain, p.phone, p.email, p.recommended_tier, p.setup_price,
                               p.monthly_price, p.reasoning, p.proposal_text])
 
     out_xlsx = out_csv.rsplit(".", 1)[0] + ".xlsx"

@@ -73,6 +73,7 @@ class QualificationResult:
     domain: str
     name: str
     phone: str
+    email: str
     qualified: bool
     confidence: float          # 0-1, model's self-reported confidence
     reasoning: str
@@ -187,6 +188,7 @@ Company to evaluate:
         domain=row.get("domain", ""),
         name=row.get("name", ""),
         phone=row.get("phone", ""),
+        email=row.get("email", ""),
         qualified=bool(parsed.get("qualified", False)),
         confidence=float(parsed.get("confidence", 0.0)),
         reasoning=parsed.get("reasoning", ""),
@@ -216,10 +218,10 @@ def run(in_csv: str, out_csv: str, product: str, pitch: str, project: str,
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["name", "domain", "phone", "qualified", "confidence", "reasoning",
+        writer.writerow(["name", "domain", "phone", "email", "qualified", "confidence", "reasoning",
                           "pain_points_guess", "outreach_draft"])
         for r in results:
-            writer.writerow([r.name, r.domain, r.phone, r.qualified, r.confidence,
+            writer.writerow([r.name, r.domain, r.phone, r.email, r.qualified, r.confidence,
                               r.reasoning, r.pain_points_guess, r.outreach_draft])
 
     return results

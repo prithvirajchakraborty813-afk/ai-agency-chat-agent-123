@@ -353,15 +353,18 @@ def run(out_csv: str, project: str, description: str, count: int, model: str = D
         writer = csv.writer(f)
         # Matches icp_finder.py's prospects.csv column shape where possible,
         # so downstream scripts (gemini_vertex_qualifier.py, sheets_sync.py)
-        # work unmodified against either source.
-        writer.writerow(["name", "domain", "phone", "fit_score", "industry", "employee_count",
-                          "location", "matched_signals", "source_url"])
+        # work unmodified against either source. "email" added this session
+        # to match gemini_maps_finder.py's new column — left blank here for
+        # the same reason phone is: web-search grounding doesn't reliably
+        # surface either the way Maps listings do.
+        writer.writerow(["name", "domain", "phone", "email", "fit_score", "industry",
+                          "employee_count", "location", "matched_signals", "source_url"])
         for c in companies:
             domain_out = c.domain.strip() if c.domain.strip() else _synthetic_key(c.name, c.location)
             # Web-search grounding doesn't reliably surface phone numbers the way
             # Maps listings do — left blank here rather than guessed. Use
             # gemini_maps_finder.py for phone-number coverage.
-            writer.writerow([c.name, domain_out, "", "", "", "", c.location, c.reasoning, ""])
+            writer.writerow([c.name, domain_out, "", "", "", "", "", c.location, c.reasoning, ""])
 
     return companies
 

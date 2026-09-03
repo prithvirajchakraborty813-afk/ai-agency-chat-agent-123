@@ -3,12 +3,13 @@
 send_proposals.py — sends the real proposal_text from proposals.csv to
 each lead, over email or WhatsApp depending on PRIMARY_CHANNEL (see that
 constant below). Currently EMAIL-ONLY by default (PRIMARY_CHANNEL=email):
-every lead is emailed via Gmail/Brevo, using a guessed info@/contact@
-address from their `domain` value — see email_sender.py's module
-docstring for the important limitation (it's a guessed address, not a
-real captured email; expect a meaningfully lower hit rate than a direct
-channel). Leads with no `domain` on file get no send at all in this mode
-— a phone number alone isn't enough, since WhatsApp isn't used.
+every lead is emailed at their real captured `email` address when the
+finder scripts found one listed on Maps/their website; if not, it falls
+back to a guessed info@/contact@ address from their `domain` value — see
+email_sender.py's module docstring for the guessed-address limitation
+(lower hit rate than a real captured address; expect some bounces).
+Leads with neither a real `email` nor a `domain` get no send at all in
+this mode — a phone number alone isn't enough, since WhatsApp isn't used.
 
 WHATSAPP (parked, not removed): the original WhatsApp send path — via a
 self-hosted WAHA instance, your own linked number, no message-volume cap
@@ -161,8 +162,14 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
         proposal_text = row.get("proposal_text", "").strip()
         raw_phone = row.get("phone", "")
         domain = row.get("domain", "").strip()
+        real_email = row.get("email", "").strip()
         to = normalize_phone(raw_phone)
-        e_key = _email_key(domain)
+        # Prefer a real, listed email address (from Maps/website, captured by
+        # gemini_maps_finder.py) over the guessed info@/contact@ fallback —
+        # a real address is far more likely to actually reach someone and
+        # not bounce/spam-flag. Falls back to the domain-guess key exactly
+        # as before when no real address was found for this lead.
+        e_key = f"email:{real_email.lower()}" if real_email else _email_key(domain)
 
         # PRIMARY_CHANNEL == "email": WhatsApp is never attempted, so
         # can_try_whatsapp stays False regardless of whether a phone
@@ -175,7 +182,7 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
 
         if not can_try_whatsapp and not can_try_email:
             if PRIMARY_CHANNEL == "email":
-                reason = "already emailed" if e_key else "no domain on file (email-only mode — phone number, if any, isn't used)"
+                reason = "already emailed" if e_key else "no email or domain on file (email-only mode — phone number, if any, isn't used)"
             else:
                 reason = "already sent on every available channel" if (to or e_key) else "no phone or domain on file"
             print(f"  [{i}/{len(rows)}] {name:40s} -> SKIPPED ({reason})")
@@ -190,8 +197,11 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
             if can_try_whatsapp:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD SEND (WhatsApp) to {to}: {proposal_text[:80]}...")
             elif can_try_email:
-                guesses = email_sender.guess_email_addresses(domain)
-                print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD EMAIL (guessed {guesses}): {proposal_text[:80]}...")
+                if real_email:
+                    print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD EMAIL (real address {real_email}): {proposal_text[:80]}...")
+                else:
+                    guesses = email_sender.guess_email_addresses(domain)
+                    print(f"  [{i}/{len(rows)}] {name:40s} -> WOULD EMAIL (guessed {guesses}): {proposal_text[:80]}...")
             continue
 
         sent_ok = False
@@ -214,8 +224,14 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
 
         if not sent_ok and can_try_email:
             subject = f"AI customer-engagement assistant for {name}" if name else "AI customer-engagement assistant"
-            ok, detail = email_sender.send_email_with_fallback_guesses(
-                gmail_address, gmail_app_password, domain, subject, proposal_text)
+            if real_email:
+                ok, detail = email_sender.send_email(
+                    gmail_address, gmail_app_password, real_email, subject, proposal_text)
+                if ok:
+                    detail = f"sent to real address {real_email} ({detail})"
+            else:
+                ok, detail = email_sender.send_email_with_fallback_guesses(
+                    gmail_address, gmail_app_password, domain, subject, proposal_text)
             if ok:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> sent (email fallback), {detail}")
                 log_writer.writerow({"name": name, "phone": e_key, "channel": "email", "status": "sent", "detail": detail})
