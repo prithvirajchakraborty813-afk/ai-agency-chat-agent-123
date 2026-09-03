@@ -38,6 +38,7 @@ jobs:
           WAHA_SESSION: ${{ secrets.WAHA_SESSION }}
           WAHA_API_KEY: ${{ secrets.WAHA_API_KEY }}
           OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+          OWNER_EMAIL: ${{ secrets.OWNER_EMAIL }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
