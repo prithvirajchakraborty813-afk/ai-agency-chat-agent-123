@@ -1117,12 +1117,17 @@ def _create_and_send_contract(lead_phone: str, convo: dict, tier_info: dict,
         )
     _send_contract_and_qr(lead_phone, order, contract_msg)
     set_stage(lead_phone, "awaiting_payment", pending_order_id=order["order_id"])
-    send_whatsapp(OWNER_PHONE, f"Sent. Order {order['order_id']} — awaiting payment of ₹{order['amount_rupees']:,}.")
+    send_whatsapp(
+        OWNER_PHONE,
+        f"Sent. Order {order['order_id']} — awaiting payment of ₹{order['amount_rupees']:,}.\n"
+        f"Once you see the payment land in your own UPI app, confirm it with:\n"
+        f"PAID {order['order_id']} {order['amount_rupees']}"
+    )
 
 
 def handle_owner_message(text: str) -> None:
     """
-    Recognizes two command shapes:
+    Recognizes three command shapes:
       - "APPROVE <lead_phone>" — the normal path. Used when the lead
         already picked a fixed-price tier (Starter/Growth) at the catalog
         stage, so the exact amount is already known (convo["fixed_price"]).
@@ -1136,9 +1141,19 @@ def handle_owner_message(text: str) -> None:
         (e.g. a malformed/edited tiers file). Not expected in normal
         operation since every catalog tier now carries a fixed price.
         Sends immediately once the owner names a number.
+      - "PAID <order_id> <amount>" — confirms a payment. This is the ONLY
+        way an order's status ever moves off "awaiting_payment": personal
+        UPI has no API this app can poll, so there is no automatic way to
+        detect that money landed — you check your own UPI app/bank
+        notification, then tell the bot the amount with this command. It
+        calls order_contract.check_payment(), which does an exact-match
+        check (never "any amount > 0") and returns one of three outcomes
+        (paid / underpaid / overpaid) — see that function's docstring for
+        why underpayment (e.g. a ₹1 test) is never treated as paid.
     Anything else from the owner is logged but not acted on — this
     deliberately does NOT try to guess intent from free-form text, since a
-    wrong guess here could send a customer an unapproved offer.
+    wrong guess here could send a customer an unapproved offer or falsely
+    mark an order paid.
     """
     parts = text.strip().split()
 
@@ -1188,6 +1203,35 @@ def handle_owner_message(text: str) -> None:
         tier_info = tiers.get(tier_key, {})
 
         _create_and_send_contract(lead_phone, convo, tier_info, tier_key, amount)
+        return
+
+    if len(parts) == 3 and parts[0].upper() == "PAID":
+        order_id, amount_str = parts[1], parts[2]
+        try:
+            received_rupees = float(amount_str)
+        except ValueError:
+            send_whatsapp(OWNER_PHONE, f"Couldn't read '{amount_str}' as an amount. Try again, e.g. PAID {order_id} 7000")
+            return
+
+        result = order_contract.check_payment(order_id, received_rupees)
+
+        # Always tell the owner the outcome — paid, underpaid, overpaid, or
+        # unknown order. This is the one message that matters most: it's
+        # the only confirmation the owner gets that the exact-match check
+        # ran and what it decided.
+        send_whatsapp(OWNER_PHONE, f"💰 {result.message_for_user}")
+
+        # For underpayment only, check_payment() may also have prepared a
+        # one-time nudge to send the customer directly (see its docstring
+        # for the nudged_once guard against spamming the same customer on
+        # every partial-payment notification). Look up the order to find
+        # who to send it to and on which channel.
+        if result.message_for_customer:
+            order = order_contract.get_order(order_id)
+            if order and order.get("customer_phone"):
+                send_whatsapp(order["customer_phone"], result.message_for_customer)
+            else:
+                print(f"[warning] PAID {order_id}: had a customer nudge to send but no customer_phone on the order record.", file=sys.stderr)
         return
 
     print(f"[info] Owner sent a message not recognized as a command: {text!r} — no action taken.")
