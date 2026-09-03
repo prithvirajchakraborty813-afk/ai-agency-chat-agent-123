@@ -57,6 +57,27 @@ import requests
 
 import email_sender
 
+# ---------------------------------------------------------------------------
+# Vertex AI auth for every subprocess this script spawns — same reasoning
+# and pattern as chat_agent.py's identical block (see there for the full
+# explanation). Written here too because gemini_maps_finder.py,
+# gemini_vertex_qualifier.py, and proposal_generator.py each call
+# google.auth.default() on their own and do NOT do this bootstrap
+# themselves — they rely on GOOGLE_APPLICATION_CREDENTIALS already being a
+# valid file path. Since subprocess.run() (used below) inherits the
+# current process's environment by default, writing the file and setting
+# the var here, before any subprocess is spawned, is enough for all of
+# them to pick it up with no changes to those files. Without this, the
+# very first step of the chain fails immediately with an ADC error.
+# ---------------------------------------------------------------------------
+_ADC_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "")
+if _ADC_JSON and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+    _adc_path = "/tmp/adc.json"
+    with open(_adc_path, "w", encoding="utf-8") as _f:
+        _f.write(_ADC_JSON)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _adc_path
+    print("[info] Wrote ADC credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON to /tmp/adc.json")
+
 WAHA_BASE_URL = os.environ.get("WAHA_BASE_URL", "http://localhost:3000").rstrip("/")
 WAHA_SESSION = os.environ.get("WAHA_SESSION", "default")
 WAHA_API_KEY = os.environ.get("WAHA_API_KEY", "")
