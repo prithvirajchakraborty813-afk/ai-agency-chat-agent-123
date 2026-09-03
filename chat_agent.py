@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -1007,7 +1008,7 @@ def handle_lead_message(phone: str, text: str) -> None:
                 f"Package: {tier_info.get('label', selected_key)}\n"
                 f"{price_line}\n\n"
                 f"Summary: {owner_summary}\n\n"
-                + (f"Reply APPROVE {phone} to send the contract + payment link now."
+                + (f"Reply APPROVE PROPOSAL (or APPROVE {phone}) to send the contract + payment link now."
                    if fixed_price is not None
                    else f"Reply SETPRICE {phone} <amount> to set the quote and send the contract.")
             )
@@ -1120,68 +1121,131 @@ def _create_and_send_contract(lead_phone: str, convo: dict, tier_info: dict,
     send_whatsapp(
         OWNER_PHONE,
         f"Sent. Order {order['order_id']} — awaiting payment of ₹{order['amount_rupees']:,}.\n"
-        f"Once you see the payment land in your own UPI app, confirm it with:\n"
-        f"PAID {order['order_id']} {order['amount_rupees']}"
+        f"Once you see the payment land in your own UPI app, confirm it by "
+        f"replying ACCEPTED to this message (or PAID {order['order_id']} "
+        f"{order['amount_rupees']} from anywhere)."
     )
+
+
+_ORDER_ID_RE = re.compile(r"\bORD-[0-9A-F]{8}\b", re.IGNORECASE)
+# Matches the lead identifier as it appears verbatim in the "Ready to
+# propose" owner notification's own suggested-reply line — e.g.
+# "APPROVE 919876543210" or "APPROVE email:someclinic.com" — so the same
+# pattern that finds it in a fresh WhatsApp reply also finds it inside
+# Gmail's quoted "> Reply APPROVE 919876543210 to send..." text.
+_LEAD_ID_RE = re.compile(r"\b(?:\d{10,15}|email:[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b")
+
+
+def _first_real_line(text: str) -> str:
+    """Returns just the line(s) the owner actually typed, stripping quoted
+    email history below it. Gmail/Outlook-style replies append the entire
+    previous message beneath what was typed, marked by a line starting
+    "On ... wrote:" followed by ">"-prefixed quote lines — without
+    stripping this, a command like "PAID ORD-77AFA64D 7000" never matches
+    any fixed-shape command check, since text.split() picks up every word
+    from the quoted history too (confirmed as the actual cause of the
+    owner's PAID replies being logged as "not recognized as a command"
+    despite being typed correctly). WhatsApp messages have no such quoting
+    and pass through this function unchanged."""
+    lines = text.splitlines()
+    kept = []
+    for line in lines:
+        stripped = line.strip()
+        # Gmail/Outlook quote-header line, e.g. "On Thu, 3 Sept 2026 at
+        # 12:31, <support@companion-app.website> wrote:" — everything from
+        # here down is quoted history, not something the owner typed.
+        if re.match(r"^On .+ wrote:\s*$", stripped):
+            break
+        # ">"-prefixed quote lines (some clients quote without an "On...
+        # wrote:" header, or the header itself got line-wrapped oddly).
+        if stripped.startswith(">"):
+            break
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def handle_owner_message(text: str) -> None:
     """
-    Recognizes three command shapes:
-      - "APPROVE <lead_phone>" — the normal path. Used when the lead
-        already picked a fixed-price tier (Starter/Growth) at the catalog
-        stage, so the exact amount is already known (convo["fixed_price"]).
-        On approve, the contract + payment link are sent to the customer
-        IMMEDIATELY, automatically — no further confirmation step. This is
-        deliberate: fixing prices in the catalog removed the need for a
-        separate price-locking round-trip, since there's no range left for
-        a human to pick a number from.
+    Recognizes five command shapes. The first three require the owner to
+    name the lead/order explicitly; the last two are simpler no-argument
+    versions that instead auto-detect their target from the message
+    itself — see each one's own comment below for how.
+
+      - "APPROVE <lead_phone>" — the normal explicit path. Used when the
+        lead already picked a fixed-price tier (Starter/Growth) at the
+        catalog stage, so the exact amount is already known
+        (convo["fixed_price"]). On approve, the contract + payment link
+        are sent to the customer IMMEDIATELY, automatically — no further
+        confirmation step. This is deliberate: fixing prices in the
+        catalog removed the need for a separate price-locking round-trip,
+        since there's no range left for a human to pick a number from.
       - "SETPRICE <lead_phone> <amount>" — fallback path for the rare
         case where a lead's selected tier has no fixed price on record
         (e.g. a malformed/edited tiers file). Not expected in normal
         operation since every catalog tier now carries a fixed price.
         Sends immediately once the owner names a number.
-      - "PAID <order_id> <amount>" — confirms a payment. This is the ONLY
-        way an order's status ever moves off "awaiting_payment": personal
-        UPI has no API this app can poll, so there is no automatic way to
-        detect that money landed — you check your own UPI app/bank
-        notification, then tell the bot the amount with this command. It
-        calls order_contract.check_payment(), which does an exact-match
-        check (never "any amount > 0") and returns one of three outcomes
-        (paid / underpaid / overpaid) — see that function's docstring for
-        why underpayment (e.g. a ₹1 test) is never treated as paid.
+      - "PAID <order_id> <amount>" — confirms a payment with an exact-
+        match check (never "any amount > 0") against the order's own
+        recorded price, catching typos/underpayment before marking paid.
+      - "APPROVE PROPOSAL" — same effect as "APPROVE <lead_phone>", but
+        the lead is found automatically instead of typed: this only works
+        when replying to the specific "Ready to propose" notification
+        email for that lead (via Reply, not a fresh message), since the
+        lead's own identifier (phone number or "email:domain") is
+        recovered from that notification's quoted text — see
+        _find_lead_id_in_text below. Over WhatsApp, where there's no
+        quoting, use the explicit "APPROVE <lead_phone>" form instead.
+      - "ACCEPTED" — same effect as "PAID <order_id> <amount>", but
+        skips the exact-match amount check entirely and trusts the owner:
+        it marks the order paid using the order's OWN recorded price,
+        not a typed number. Like APPROVE PROPOSAL, this only works when
+        replying to that specific order's payment-link notification,
+        since the order ID is recovered from the quoted "Order
+        ORD-XXXXXXXX" text — see _ORDER_ID_RE below. This deliberately
+        trades away the underpayment/typo safety net PAID has, in
+        exchange for a one-word command; the owner is expected to have
+        already checked their own bank/UPI app before typing it.
+
     Anything else from the owner is logged but not acted on — this
-    deliberately does NOT try to guess intent from free-form text, since a
-    wrong guess here could send a customer an unapproved offer or falsely
-    mark an order paid.
+    deliberately does NOT try to guess intent from arbitrary free-form
+    text (only these five fixed shapes), since a wrong guess here could
+    send a customer an unapproved offer or falsely mark an order paid.
     """
+    # Strip quoted email history (Gmail/Outlook-style "On ... wrote:" +
+    # ">" quote blocks) before any fixed-shape command check — otherwise
+    # a correctly-typed "PAID ORD-77AFA64D 7000" or "ACCEPTED" never
+    # matches, since the raw body includes every word of the quoted
+    # notification below it too. The ORIGINAL unstripped text is kept
+    # separately as raw_text, because APPROVE PROPOSAL / ACCEPTED
+    # specifically need to search the QUOTED portion — that's where the
+    # lead id / order id they're auto-detecting actually lives.
+    raw_text = text
+    text = _first_real_line(text)
     parts = text.strip().split()
 
-    if len(parts) == 2 and parts[0].upper() == "APPROVE":
+    if len(parts) == 2 and parts[0].upper() == "APPROVE" and parts[1].upper() != "PROPOSAL":
         lead_phone = parts[1]
-        conversations = _load_conversations()
-        convo = conversations.get(lead_phone)
-        if convo is None or convo.get("stage") != "awaiting_owner_approval":
-            send_whatsapp(OWNER_PHONE, f"No pending approval found for {lead_phone}.")
-            return
+        _approve_lead(lead_phone)
+        return
 
-        tiers = load_tiers()
-        tier_key = convo.get("recommended_tier") or next(iter(tiers))
-        tier_info = tiers.get(tier_key, {})
-        fixed_price = convo.get("fixed_price")
-
-        if fixed_price is None:
-            # No fixed price on record — can't auto-charge without a
-            # number. Ask for it via SETPRICE instead of guessing.
+    if len(parts) == 2 and parts[0].upper() == "APPROVE" and parts[1].upper() == "PROPOSAL":
+        # "APPROVE PROPOSAL" — find which lead this is via the quoted
+        # notification text rather than a typed phone number. The
+        # "Ready to propose" alert always contains either a bare phone
+        # number (WhatsApp leads) or "email:<domain>" (email leads) in
+        # its own body, so the same pattern that appears when the owner
+        # composes fresh also appears when Gmail quotes that alert back.
+        lead_id = _find_lead_id_in_text(raw_text)
+        if not lead_id:
             send_whatsapp(
                 OWNER_PHONE,
-                f"{tier_info.get('label', tier_key)} has no fixed price on record for "
-                f"{lead_phone}. Reply with the exact amount to charge, e.g.:\n"
-                f"SETPRICE {lead_phone} 12000"
+                "APPROVE PROPOSAL: couldn't find which lead this is for — "
+                "make sure you're replying directly to that lead's \"Ready "
+                "to propose\" alert (not a fresh message), or use "
+                "APPROVE <lead_phone> instead."
             )
             return
-
-        _create_and_send_contract(lead_phone, convo, tier_info, tier_key, fixed_price)
+        _approve_lead(lead_id)
         return
 
     if len(parts) == 3 and parts[0].upper() == "SETPRICE":
@@ -1212,29 +1276,114 @@ def handle_owner_message(text: str) -> None:
         except ValueError:
             send_whatsapp(OWNER_PHONE, f"Couldn't read '{amount_str}' as an amount. Try again, e.g. PAID {order_id} 7000")
             return
+        _mark_order_paid(order_id, received_rupees)
+        return
 
-        result = order_contract.check_payment(order_id, received_rupees)
-
-        # Always tell the owner the outcome — paid, underpaid, overpaid, or
-        # unknown order. This is the one message that matters most: it's
-        # the only confirmation the owner gets that the exact-match check
-        # ran and what it decided.
-        send_whatsapp(OWNER_PHONE, f"💰 {result.message_for_user}")
-
-        # For underpayment only, check_payment() may also have prepared a
-        # one-time nudge to send the customer directly (see its docstring
-        # for the nudged_once guard against spamming the same customer on
-        # every partial-payment notification). Look up the order to find
-        # who to send it to and on which channel.
-        if result.message_for_customer:
-            order = order_contract.get_order(order_id)
-            if order and order.get("customer_phone"):
-                send_whatsapp(order["customer_phone"], result.message_for_customer)
-            else:
-                print(f"[warning] PAID {order_id}: had a customer nudge to send but no customer_phone on the order record.", file=sys.stderr)
+    if len(parts) == 1 and parts[0].upper() == "ACCEPTED":
+        # "ACCEPTED" — find which order this is via the quoted payment-
+        # link notification text (contains "Order ORD-XXXXXXXX") rather
+        # than a typed order id, and trust the order's own recorded price
+        # rather than a typed amount. See the docstring above for the
+        # explicit tradeoff this makes vs PAID.
+        order_id = _find_order_id_in_text(raw_text)
+        if not order_id:
+            send_whatsapp(
+                OWNER_PHONE,
+                "ACCEPTED: couldn't find which order this is for — make "
+                "sure you're replying directly to that order's payment-"
+                "link message (not a fresh message), or use "
+                "PAID <order_id> <amount> instead."
+            )
+            return
+        order = order_contract.get_order(order_id)
+        if not order:
+            send_whatsapp(OWNER_PHONE, f"ACCEPTED: no order found with id {order_id}.")
+            return
+        _mark_order_paid(order_id, float(order["amount_rupees"]))
         return
 
     print(f"[info] Owner sent a message not recognized as a command: {text!r} — no action taken.")
+
+
+def _find_order_id_in_text(text: str) -> str:
+    """Returns the first ORD-XXXXXXXX id found anywhere in text (searches
+    the FULL text, quoted history included — that's deliberately where
+    this looks, since the id being auto-detected lives in the quoted
+    notification, not anything the owner typed), or "" if none found."""
+    match = _ORDER_ID_RE.search(text)
+    return match.group(0).upper() if match else ""
+
+
+def _find_lead_id_in_text(text: str) -> str:
+    """Returns the first lead identifier (bare phone number, or
+    "email:<domain>") found anywhere in text — same full-text/quoted-
+    history search as _find_order_id_in_text, and for the same reason.
+    Checks "email:<domain>" first since a bare phone-number pattern could
+    otherwise false-match digits inside an unrelated context; returns ""
+    if neither is found."""
+    email_match = re.search(r"\bemail:[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", text)
+    if email_match:
+        return email_match.group(0)
+    phone_match = re.search(r"\b\d{10,15}\b", text)
+    return phone_match.group(0) if phone_match else ""
+
+
+def _approve_lead(lead_phone: str) -> None:
+    """Shared by both APPROVE <lead_phone> and APPROVE PROPOSAL — looks up
+    the lead, sends the contract if a fixed price is on record, or asks
+    for SETPRICE if not. Pulled out of handle_owner_message so both
+    command shapes share exactly one implementation rather than two
+    copies that could drift apart."""
+    conversations = _load_conversations()
+    convo = conversations.get(lead_phone)
+    if convo is None or convo.get("stage") != "awaiting_owner_approval":
+        send_whatsapp(OWNER_PHONE, f"No pending approval found for {lead_phone}.")
+        return
+
+    tiers = load_tiers()
+    tier_key = convo.get("recommended_tier") or next(iter(tiers))
+    tier_info = tiers.get(tier_key, {})
+    fixed_price = convo.get("fixed_price")
+
+    if fixed_price is None:
+        # No fixed price on record — can't auto-charge without a number.
+        # Ask for it via SETPRICE instead of guessing.
+        send_whatsapp(
+            OWNER_PHONE,
+            f"{tier_info.get('label', tier_key)} has no fixed price on record for "
+            f"{lead_phone}. Reply with the exact amount to charge, e.g.:\n"
+            f"SETPRICE {lead_phone} 12000"
+        )
+        return
+
+    _create_and_send_contract(lead_phone, convo, tier_info, tier_key, fixed_price)
+
+
+def _mark_order_paid(order_id: str, received_rupees: float) -> None:
+    """Shared by both PAID <order_id> <amount> and ACCEPTED — runs the
+    exact-match check and sends the owner + (if applicable) customer
+    notifications. Pulled out of handle_owner_message so both command
+    shapes share exactly one implementation rather than two copies that
+    could drift apart."""
+    result = order_contract.check_payment(order_id, received_rupees)
+
+    # Always tell the owner the outcome — paid, underpaid, overpaid, or
+    # unknown order. This is the one message that matters most: it's the
+    # only confirmation the owner gets that the check ran and what it
+    # decided.
+    send_whatsapp(OWNER_PHONE, f"💰 {result.message_for_user}")
+
+    # For underpayment only, check_payment() may also have prepared a
+    # one-time nudge to send the customer directly (see its docstring for
+    # the nudged_once guard against spamming the same customer on every
+    # partial-payment notification). Look up the order to find who to
+    # send it to and on which channel.
+    if result.message_for_customer:
+        order = order_contract.get_order(order_id)
+        if order and order.get("customer_phone"):
+            send_whatsapp(order["customer_phone"], result.message_for_customer)
+        else:
+            print(f"[warning] {order_id}: had a customer nudge to send but no customer_phone on the order record.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
