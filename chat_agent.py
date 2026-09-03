@@ -125,7 +125,7 @@ OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")  # where owner alerts go if OWNE
 # ("Ready to propose", "Sent. Order X — awaiting payment", etc.) go.
 OWNER_NOTIFY_CHANNEL = os.environ.get("OWNER_NOTIFY_CHANNEL", "whatsapp").strip().lower()
 POLL_EMAIL_SECRET = os.environ.get("POLL_EMAIL_SECRET", "")  # shared secret so /poll-email can't be hit by randoms
-EMAIL_REPLY_SUBJECT = "Re: your message"
+EMAIL_REPLY_SUBJECT = "Vortex AI — following up on your message"
 # Base URL of this very service on Render, e.g. https://ai-agency-chat-agent-123.onrender.com
 # (no trailing slash) — same value already used as a GitHub Actions secret for
 # /poll-email, just also set here as a Render env var so this app can build a

@@ -116,6 +116,58 @@ def guess_email_addresses(domain: str) -> list[str]:
     return [f"{prefix}@{d}" for prefix in EMAIL_GUESS_PREFIXES]
 
 
+def _plain_text_to_html(body: str) -> str:
+    """Turns a plain-text message into simple, professional-looking HTML:
+    paragraphs from blank-line-separated blocks, a real clickable button
+    for any upi:// or http(s):// link found on its own line (instead of a
+    long raw URL sitting in plain text, which reads as low-effort/spammy),
+    and a small branded header/footer. Deliberately simple — no external
+    images, no tracking pixels, no marketing-template flourishes — since
+    those are themselves common spam signals; the goal here is "looks
+    like a real small business sent this," not "looks like a campaign."
+    """
+    import html as _html
+
+    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+    blocks = []
+    for para in paragraphs:
+        lines = para.split("\n")
+        # A paragraph that's ONLY a link (the payment link line) becomes a
+        # button instead of plain wrapped text.
+        if len(lines) == 1 and re.match(r"^(https?://|upi://)\S+$", lines[0].strip()):
+            url = lines[0].strip()
+            blocks.append(
+                f'<p style="text-align:center;margin:24px 0;">'
+                f'<a href="{_html.escape(url)}" '
+                f'style="background:#4F46E5;color:#ffffff;text-decoration:none;'
+                f'padding:12px 28px;border-radius:6px;font-weight:600;'
+                f'display:inline-block;">Pay via UPI</a></p>'
+            )
+        else:
+            escaped = _html.escape(para).replace("\n", "<br>")
+            blocks.append(f'<p style="margin:0 0 16px;line-height:1.5;">{escaped}</p>')
+
+    body_html = "\n".join(blocks)
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head><body style="margin:0;padding:0;background:#f4f4f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7;padding:32px 0;">
+<tr><td align="center">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;">
+<tr><td style="background:#111827;padding:20px 32px;">
+<span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:0.3px;">Vortex AI</span>
+</td></tr>
+<tr><td style="padding:32px;color:#1f2937;font-size:15px;">
+{body_html}
+</td></tr>
+<tr><td style="padding:20px 32px;background:#f9fafb;color:#9ca3af;font-size:12px;">
+This email was sent by Vortex AI. If you weren't expecting this, you can safely ignore it.
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>"""
+
+
 def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
                 subject: str, body: str) -> tuple[bool, str]:
     """Sends one email via Brevo's HTTPS transactional API. Returns
@@ -151,10 +203,12 @@ def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
     if not from_addr:
         return False, "Neither SEND_FROM_EMAIL nor GMAIL_ADDRESS set — no from-address available"
     payload = {
-        "sender": {"email": from_addr},
+        "sender": {"email": from_addr, "name": "Vortex AI"},
         "to": [{"email": to_addr}],
         "subject": subject,
         "textContent": body,
+        "htmlContent": _plain_text_to_html(body),
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
     }
     # Only set Reply-To when it differs from the from-address — if
     # SEND_FROM_EMAIL isn't configured, from_addr IS gmail_address already,
