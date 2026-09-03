@@ -1566,6 +1566,62 @@ def poll_email():
     return jsonify({"status": "ok", **result}), 200
 
 
+@app.route("/create-test-order", methods=["GET"])
+def create_test_order_route():
+    """Free-tier-friendly stand-in for running create_test_order.py at a
+    shell prompt — Render's Shell tab and One-Off Jobs are both PAID-ONLY
+    features, unavailable on the free plan this service runs on, so
+    there's no terminal to run that script from directly. This route does
+    the same thing (order_contract.create_order() with a fake customer
+    identifier, never a real lead) but is triggered by a plain browser
+    visit/GET request instead.
+
+    Query params (all optional):
+      ?amount=100        rupees to lock in (default 100 — small on
+                          purpose, cheap to actually pay if testing a
+                          real transfer)
+      ?secret=...         required if POLL_EMAIL_SECRET is set (reuses
+                          that same secret rather than introducing a
+                          second one to configure) — pass it in the URL
+                          as a query param since this is meant to be
+                          opened directly in a browser, where a custom
+                          header isn't practical.
+
+    Returns the order_id and the exact PAID command to send — same
+    output as the standalone script, just delivered as a webpage instead
+    of shell/stdout. This is NOT a real order and is never linked to any
+    real WhatsApp/email conversation — sending PAID for it never
+    messages a real customer.
+    """
+    if POLL_EMAIL_SECRET:
+        if request.args.get("secret", "") != POLL_EMAIL_SECRET:
+            return jsonify({"status": "error", "detail": "bad or missing ?secret="}), 401
+    else:
+        print("[warning] POLL_EMAIL_SECRET not set — /create-test-order is callable by anyone with the URL.")
+
+    try:
+        amount = int(request.args.get("amount", "100"))
+    except ValueError:
+        return jsonify({"status": "error", "detail": "?amount= must be a whole number"}), 400
+
+    order = order_contract.create_order(
+        customer_name="TEST ORDER (safe to ignore)",
+        customer_phone="test:dummy-order",
+        tier_name="TEST",
+        scope_summary="Dummy order created via /create-test-order — not a real customer.",
+        amount_rupees=amount,
+        upi_id=OWNER_UPI_ID,
+    )
+    paid_command = f"PAID {order['order_id']} {amount}"
+    return jsonify({
+        "status": "ok",
+        "order_id": order["order_id"],
+        "amount_rupees": amount,
+        "send_this_to_the_bot_as_owner": paid_command,
+        "note": "This is a fake test order — sending the PAID command above will never message a real customer.",
+    }), 200
+
+
 @app.route("/", methods=["GET"])
 def health():
     # Doubles as the keep-alive target for poll-email.yml on Render's free
