@@ -25,10 +25,19 @@ SETUP (no PAN, free):
     1. On the Gmail account you want to send from: turn on 2-Step
        Verification (myaccount.google.com/security), then generate an
        App Password (myaccount.google.com/apppasswords) — a 16-character
-       code, NOT your normal Gmail password.
-    2. Set as env vars (or pass via CLI flags):
+       code, NOT your normal Gmail password. This is used for IMAP
+       polling of replies (fetch_new_replies below) — NOT for sending;
+       see next step.
+    2. Sending goes through Brevo's HTTPS API, not Gmail SMTP directly —
+       Render's free tier blocks outbound SMTP ports (25/465/587), which
+       silently broke every send before this was caught (see the
+       BREVO_API_URL note further down for the full story). Sign up free
+       at app.brevo.com, verify a sender, then get an API key from
+       Settings -> SMTP & API -> API Keys.
+    3. Set as env vars (or pass via CLI flags):
            GMAIL_ADDRESS=youraddress@gmail.com
            GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx
+           BREVO_API_KEY=xkeysib-xxxxxxxxxxxxxxxx
 
 REPLIES: fetch_new_replies() below polls the inbox over IMAP and
 returns unread messages as (sender_address, body) pairs, marking them
@@ -54,6 +63,7 @@ import email
 import imaplib
 import os
 import re
+import requests
 import smtplib
 import sys
 from datetime import datetime, timedelta
@@ -65,6 +75,25 @@ GMAIL_SMTP_HOST = "smtp.gmail.com"
 GMAIL_SMTP_PORT = 587
 GMAIL_IMAP_HOST = "imap.gmail.com"
 GMAIL_IMAP_PORT = 993
+
+# Render's free tier blocks outbound traffic on SMTP ports 25/465/587 as of
+# Sep 26 2025 (https://render.com/changelog/free-web-services-will-no-longer-
+# allow-outbound-traffic-to-smtp-ports) — confirmed here as the actual cause
+# of every "sent" reply silently failing with [Errno 101] Network is
+# unreachable, while IMAP (a different port, not blocked) kept working fine
+# for polling. Sending now goes over Brevo's HTTPS API instead, which isn't
+# port-restricted. IMAP polling above is unaffected and still uses Gmail
+# directly — only outbound sending moved.
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
+# Optional — the address replies are sent FROM. Separate from GMAIL_ADDRESS
+# on purpose: GMAIL_ADDRESS still does the IMAP polling (reading incoming
+# replies) and is a real Gmail inbox; SEND_FROM_EMAIL is for a properly
+# authenticated domain sender (e.g. support@yourdomain.com) that Brevo
+# sends AS, which deliverability-wise beats sending "as" a free Gmail
+# address through a third-party API. Falls back to GMAIL_ADDRESS if unset,
+# so this is a drop-in upgrade, not a required change.
+SEND_FROM_EMAIL = os.environ.get("SEND_FROM_EMAIL", "")
 
 # Tried in this order; first one that doesn't bounce at SMTP-accept time
 # "wins" for logging purposes — but SMTP accepting the message only means
@@ -89,31 +118,72 @@ def guess_email_addresses(domain: str) -> list[str]:
 
 def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
                 subject: str, body: str) -> tuple[bool, str]:
-    """Sends one email via Gmail's SMTP server. Returns (ok, detail) —
-    same shape as send_proposals.py's send_message(), so callers can
-    handle both channels identically."""
-    if not gmail_address or not gmail_app_password:
-        return False, "GMAIL_ADDRESS / GMAIL_APP_PASSWORD not set"
-    try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = gmail_address
-        msg["To"] = to_addr
+    """Sends one email via Brevo's HTTPS transactional API. Returns
+    (ok, detail) — same shape as send_proposals.py's send_message(), so
+    callers can handle both channels identically.
 
-        with smtplib.SMTP(GMAIL_SMTP_HOST, GMAIL_SMTP_PORT, timeout=20) as server:
-            server.starttls()
-            server.login(gmail_address, gmail_app_password)
-            server.sendmail(gmail_address, [to_addr], msg.as_string())
-        return True, f"accepted by {GMAIL_SMTP_HOST} for delivery to {to_addr}"
+    The "from" address is SEND_FROM_EMAIL if set (a domain address you've
+    verified + authenticated in Brevo — better deliverability than a free
+    Gmail address), otherwise falls back to gmail_address so this works
+    even before SEND_FROM_EMAIL is configured. gmail_address/
+    gmail_app_password are kept as required parameters for backward
+    compatibility with every existing caller; gmail_app_password itself
+    is unused here (still needed elsewhere in this module for IMAP
+    polling, which is unaffected by any of this).
+
+    Every send sets Reply-To back to gmail_address (your Gmail — the one
+    fetch_new_replies() above actually polls). This matters specifically
+    because SEND_FROM_EMAIL points at a domain mailbox (Zoho, in this
+    project's case) whose free plan has no IMAP/forwarding — mail sent
+    there would be invisible to this bot forever with no error, the same
+    silent-loss failure mode as the Gmail read/unread bug this module
+    already fixed once. Reply-To redirects a lead's reply to Gmail at the
+    email-client level (every major client honors it) without needing
+    forwarding, IMAP, or any paid plan on the domain mailbox's end.
+
+    Requires BREVO_API_KEY to be set as an env var — get one free at
+    app.brevo.com (Settings -> SMTP & API -> API Keys). Brevo's free tier
+    covers 300 emails/day, comfortably above this pipeline's volume.
+    """
+    if not BREVO_API_KEY:
+        return False, "BREVO_API_KEY not set — cannot send (see email_sender.py module notes)"
+    from_addr = SEND_FROM_EMAIL or gmail_address
+    if not from_addr:
+        return False, "Neither SEND_FROM_EMAIL nor GMAIL_ADDRESS set — no from-address available"
+    payload = {
+        "sender": {"email": from_addr},
+        "to": [{"email": to_addr}],
+        "subject": subject,
+        "textContent": body,
+    }
+    # Only set Reply-To when it differs from the from-address — if
+    # SEND_FROM_EMAIL isn't configured, from_addr IS gmail_address already,
+    # and an identical Reply-To is redundant (harmless, but noise).
+    if gmail_address and gmail_address != from_addr:
+        payload["replyTo"] = {"email": gmail_address}
+    try:
+        resp = requests.post(
+            BREVO_API_URL,
+            headers={
+                "accept": "application/json",
+                "api-key": BREVO_API_KEY,
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"accepted by Brevo for delivery to {to_addr}"
+        return False, f"Brevo API returned {resp.status_code}: {resp.text[:300]}"
     except Exception as e:
         return False, str(e)
 
 
 def send_email_with_fallback_guesses(gmail_address: str, gmail_app_password: str,
                                        domain: str, subject: str, body: str) -> tuple[bool, str]:
-    """Tries each guessed address in turn, stopping at the first one SMTP
-    accepts. Note this does NOT confirm delivery or that the address is
-    real — see module docstring."""
+    """Tries each guessed address in turn, stopping at the first one
+    Brevo's API accepts. Note this does NOT confirm delivery or that the
+    address is real — see module docstring."""
     candidates = guess_email_addresses(domain)
     if not candidates:
         return False, "no domain on file — nothing to guess an address from"
