@@ -299,7 +299,22 @@ def fetch_new_replies(gmail_address: str, gmail_app_password: str,
 
     results: list[tuple[str, str, str]] = []
     try:
-        with imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, GMAIL_IMAP_PORT) as imap:
+        # timeout=30: without this, imaplib's underlying socket blocks
+        # INDEFINITELY if Gmail's IMAP server is slow to respond or the
+        # connection stalls partway through — no exception, no timeout,
+        # just silence forever. Since fetch_new_replies() runs inside a
+        # single background thread on a while-True timer
+        # (chat_agent.py's _email_poll_loop), one hung connection here
+        # doesn't just fail this one poll — it freezes the ENTIRE loop
+        # permanently: no more polls, ever, until the process itself is
+        # restarted (a redeploy). This was the actual cause of email
+        # replies going completely silent for 25+ minutes with zero log
+        # output, confirmed by comparing Render logs against a diagnosis
+        # of this function. 30s is generous for a single IMAP handshake
+        # over normal networking but still finite, so a genuinely stuck
+        # connection surfaces as a caught, logged, recoverable error
+        # instead of an invisible permanent hang.
+        with imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, GMAIL_IMAP_PORT, timeout=30) as imap:
             imap.login(gmail_address, gmail_app_password)
             imap.select("INBOX")
             since_date = (datetime.utcnow() - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
