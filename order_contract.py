@@ -210,10 +210,21 @@ def build_contract_message(order: dict) -> str:
     the expected name/ID here in writing gives the customer something
     concrete to manually cross-check against whatever their UPI app
     shows, since the app itself won't do that reassurance for them.
+
+    An owner contact number is also included, right after the UPI
+    details — a customer paying a personal (non-verified-merchant) UPI ID
+    has no in-app way to confirm they're paying the right person, and no
+    support channel if something looks wrong before they pay. A direct
+    phone number gives them somewhere to check first. Read from the
+    OWNER_CONTACT_PHONE env var (falls back to a hardcoded default below)
+    rather than something only chat_agent.py knows, since this function
+    can be called standalone (see the __main__ test block at the bottom
+    of this file).
     """
     upi_link = build_upi_link(order)
     payee_name = order.get("payee_name") or "Prithviraj"
     upi_id = order["upi_id"]
+    owner_contact_phone = os.environ.get("OWNER_CONTACT_PHONE", "94330 66933")
     return (
         f"Here's the final order summary — order ID {order['order_id']}.\n\n"
         f"Package: {order['tier_name']}\n"
@@ -229,6 +240,8 @@ def build_contract_message(order: dict) -> str:
         f"your UPI app may not show a verified merchant badge — that's "
         f"expected, please just check the name/UPI ID/amount above match "
         f"what your app displays before paying.)\n\n"
+        f"Questions before paying, or anything doesn't look right? Contact us "
+        f"directly: {owner_contact_phone}\n\n"
         f"Pay via UPI: {upi_link}\n"
         f"(Please keep the order ID {order['order_id']} in the payment note if your "
         f"UPI app allows it — this helps us confirm your payment instantly.)"
