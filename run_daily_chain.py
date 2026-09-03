@@ -42,6 +42,9 @@ Run order and files:
     gemini_maps_finder.py   --> prospects_maps.csv
     gemini_search_finder.py --> prospects_search.csv   (fallback source)
     merge_prospects.py      --> prospects_merged.csv
+    filter_contactable.py   --> prospects_contactable.csv (drops phone-only
+                                 leads — see that file's docstring; only
+                                 while PRIMARY_CHANNEL=email/WhatsApp parked)
     gemini_vertex_qualifier.py --> qualified.csv
     proposal_generator.py   --> proposals.csv
     send_proposals.py       --> sends + records in Postgres (contacted_leads)
@@ -199,9 +202,30 @@ def main() -> None:
     if not run_step("Merge and dedupe", merge_cmd):
         sys.exit(1)
 
+    # Drop phone-only leads (no real email, no real domain) before they
+    # burn paid Gemini qualify/proposal-draft calls — see
+    # filter_contactable.py's module docstring. This only makes sense
+    # while PRIMARY_CHANNEL=email (WhatsApp parked) — a phone-only lead
+    # becomes reachable again once PRIMARY_CHANNEL=whatsapp, so the filter
+    # step is skipped automatically in that mode instead of needing to be
+    # removed by hand later.
+    primary_channel = os.environ.get("PRIMARY_CHANNEL", "email").strip().lower()
+    if primary_channel == "whatsapp":
+        print("\n=== Filter to contactable leads ===")
+        print("PRIMARY_CHANNEL=whatsapp — phone-only leads are contactable, skipping filter.")
+        qualify_input = "prospects_merged.csv"
+    else:
+        filter_cmd = [
+            sys.executable, "filter_contactable.py",
+            "--in", "prospects_merged.csv", "--out", "prospects_contactable.csv",
+        ]
+        if not run_step("Filter to contactable leads", filter_cmd):
+            sys.exit(1)
+        qualify_input = "prospects_contactable.csv"
+
     qualify_cmd = [
         sys.executable, "gemini_vertex_qualifier.py",
-        "--in", "prospects_merged.csv", "--out", "qualified.csv",
+        "--in", qualify_input, "--out", "qualified.csv",
         "--project", project, "--product", product, "--pitch", pitch,
         "--delay", os.environ.get("QUALIFY_DELAY", "4"),
     ]

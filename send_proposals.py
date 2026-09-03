@@ -134,9 +134,22 @@ def _email_key(domain: str) -> str | None:
     """Dedup/contacted-leads key for the email channel — kept distinct from
     the phone key (same "email:<domain>" prefix pattern chat_agent.py uses
     for "tg:<chat_id>") so a lead can be independently tracked as
-    WhatsApp-contacted and/or email-contacted without the two colliding."""
+    WhatsApp-contacted and/or email-contacted without the two colliding.
+
+    Requires a real domain shape (contains a "."), not just a non-empty
+    string — gemini_maps_finder.py writes a synthetic "no-website--<slug>"
+    placeholder into `domain` for phone-only leads (a dedupe key, not a
+    real domain; see its _synthetic_key()). Treating that placeholder as
+    truthy here used to make can_try_email True for phone-only leads,
+    which then failed downstream in email_sender.py with a confusing
+    "no domain on file" message instead of being cleanly skipped here.
+    filter_contactable.py already drops these upstream in the normal
+    daily-chain run, but this check stays as a second guard for any
+    standalone/manual run against an unfiltered CSV."""
     d = (domain or "").strip().lower()
-    return f"email:{d}" if d else None
+    if not d or "." not in d or d.startswith("no-website--"):
+        return None
+    return f"email:{d}"
 
 
 def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float, max_delay: float,
