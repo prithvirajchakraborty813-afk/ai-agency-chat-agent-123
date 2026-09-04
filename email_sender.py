@@ -70,6 +70,9 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.header import decode_header
 from email.utils import parseaddr
+from typing import Optional
+
+import dns.resolver
 
 # Senders whose mail is never a genuine lead reply — automated
 # notifications, digests, job-invite platforms, and no-reply addresses.
@@ -129,14 +132,99 @@ EMAIL_GUESS_PREFIXES = ["info", "contact"]
 
 def guess_email_addresses(domain: str) -> list[str]:
     """Best-effort guesses only — see module docstring. Returns [] for a
-    blank/missing domain (nothing to guess from)."""
+    blank/missing domain (nothing to guess from), OR for a domain that
+    has no mail-capable DNS at all (see _domain_has_mail_capable_dns) —
+    no point guessing addresses at a domain that can't receive mail full
+    stop, that's a wasted send + a guaranteed bounce every time."""
     d = (domain or "").strip().lower()
     if not d or "." not in d:
         return []
     # Finder scripts sometimes store a bare domain, sometimes a full URL —
     # normalize either shape down to just the domain part.
     d = d.replace("https://", "").replace("http://", "").split("/")[0]
+    if not _domain_has_mail_capable_dns(d):
+        return []
     return [f"{prefix}@{d}" for prefix in EMAIL_GUESS_PREFIXES]
+
+
+# ---------------------------------------------------------------------------
+# Deliverability pre-checks — layered, both optional-by-design so a DNS
+# hiccup or a missing API key degrades to the OLD behavior (try the send
+# anyway) rather than silently blocking every guessed lead.
+#
+# LAYER 1 — _domain_has_mail_capable_dns(): free, no signup, no API key,
+# works from anywhere (plain DNS over port 53 — never blocked, unlike SMTP
+# port 25 which Render/GitHub Actions/most cloud hosts block outbound by
+# default, which is exactly why real per-mailbox SMTP verification isn't
+# viable in this pipeline's infra without a third-party API — see LAYER 2).
+# Checks whether the domain has an MX record, or failing that an A/AAAA
+# record (RFC 5321 allows mail delivery to fall back to the A record when
+# no MX exists). Domain has neither -> it categorically cannot receive
+# mail -> skip guessing entirely, guaranteed bounce avoided for free. This
+# catches dead/parked/expired domains and misc junk (e.g. some free
+# page-builder domains) but will NOT catch "domain has real mail, but
+# info@/contact@ specifically doesn't exist there" — that's most of what's
+# actually bouncing right now (soft bounces, not hard "no such domain").
+#
+# LAYER 2 — verify_email_deliverable(): real per-mailbox check via
+# AbstractAPI's free tier (100 requests/month, no card required — sign up
+# at https://www.abstractapi.com/api/email-verification-validation-api,
+# then set ABSTRACT_API_KEY as an env var). This is the layer that
+# actually catches "domain's fine, but info@ isn't a real inbox" — the
+# dominant failure mode seen in Brevo's bounce log. Only runs if
+# ABSTRACT_API_KEY is set; if unset, this layer is a no-op (returns None
+# = "unknown, proceed") so nothing breaks before you've signed up. Given
+# current send volume (~20-40 guessed sends/day), the 100/month free tier
+# will run out fast — treat this as a limited budget: it's applied to
+# guessed addresses only (never real captured emails), so spend it there.
+# ---------------------------------------------------------------------------
+
+ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY", "")
+ABSTRACT_API_URL = "https://emailvalidation.abstractapi.com/v1/"
+
+
+def _domain_has_mail_capable_dns(domain: str) -> bool:
+    try:
+        answers = dns.resolver.resolve(domain, "MX", lifetime=5)
+        if len(answers) > 0:
+            return True
+    except Exception:
+        pass  # NXDOMAIN, NoAnswer, Timeout, etc. — fall through to A/AAAA check
+    for rtype in ("A", "AAAA"):
+        try:
+            if len(dns.resolver.resolve(domain, rtype, lifetime=5)) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def verify_email_deliverable(addr: str) -> Optional[bool]:
+    """True = AbstractAPI says this mailbox is deliverable. False =
+    confirmed undeliverable (skip sending, save the guaranteed bounce).
+    None = unknown — either ABSTRACT_API_KEY isn't set, or the API call
+    itself failed (network error, rate limit, bad response) — treated as
+    'proceed with the send anyway' so a flaky check never blocks a lead
+    that might have gone through fine."""
+    if not ABSTRACT_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            ABSTRACT_API_URL,
+            params={"api_key": ABSTRACT_API_KEY, "email": addr},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        deliverability = (data.get("deliverability") or "").upper()
+        if deliverability == "UNDELIVERABLE":
+            return False
+        if deliverability == "DELIVERABLE":
+            return True
+        return None  # "UNKNOWN" from the API — genuinely ambiguous, don't block
+    except Exception:
+        return None
 
 
 def _plain_text_to_html(body: str) -> str:
@@ -263,14 +351,22 @@ def send_email_with_fallback_guesses(gmail_address: str, gmail_app_password: str
     address is real — see module docstring."""
     candidates = guess_email_addresses(domain)
     if not candidates:
-        return False, "no domain on file — nothing to guess an address from"
+        return False, "no domain on file, or domain has no mail-capable DNS — nothing to guess"
 
     last_detail = ""
+    any_attempted = False
     for addr in candidates:
+        verified = verify_email_deliverable(addr)
+        if verified is False:
+            last_detail = f"{addr}: skipped — AbstractAPI confirmed undeliverable"
+            continue
+        any_attempted = True
         ok, detail = send_email(gmail_address, gmail_app_password, addr, subject, body)
         if ok:
             return True, f"sent to guessed address {addr} ({detail})"
         last_detail = f"{addr}: {detail}"
+    if not any_attempted:
+        return False, f"all guessed addresses pre-filtered as undeliverable — {last_detail}"
     return False, f"all guessed addresses failed — last error: {last_detail}"
 
 
