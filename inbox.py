@@ -40,6 +40,7 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, Response
 
 import db_storage
+import email_sender
 
 inbox_bp = Blueprint("inbox", __name__)
 
@@ -63,6 +64,28 @@ def require_key(fn):
     return wrapped
 
 
+def _is_notification_convo(convo_id: str) -> bool:
+    """True if this convo_id is an email: address matching the same
+    notification-sender rules email_sender.py uses to skip auto-replying
+    in the first place. Reused here so old junk conversations that were
+    created before those domains were added to the filter (or before this
+    filter existed at all) stop cluttering the inbox list too — their
+    history rows stay in the DB untouched, they're just hidden from view.
+    Non-email convo_ids (WhatsApp phone numbers) always pass through."""
+    if not convo_id.startswith("email:"):
+        return False
+    addr = convo_id[len("email:"):].strip().lower()
+    if "@" not in addr:
+        return False
+    local_part, domain = addr.split("@", 1)
+    if local_part in email_sender.NOREPLY_LOCAL_PARTS:
+        return True
+    return any(
+        domain == d or domain.endswith("." + d)
+        for d in email_sender.KNOWN_NOTIFICATION_DOMAINS
+    )
+
+
 def _preview(history: list) -> str:
     if not history:
         return "(no messages yet)"
@@ -73,9 +96,12 @@ def _preview(history: list) -> str:
 @inbox_bp.route("/inbox/api/conversations", methods=["GET"])
 @require_key
 def api_list_conversations():
+    show_all = request.args.get("all") == "1"
     convos = db_storage.load_all_conversations()
     out = []
     for convo_id, convo in convos.items():
+        if not show_all and _is_notification_convo(convo_id):
+            continue
         history = convo.get("history", [])
         out.append({
             "id": convo_id,
@@ -216,7 +242,12 @@ INBOX_HTML = r"""<!doctype html>
 </div>
 
 <div id="app">
-  <div id="list"></div>
+  <div id="list">
+    <div id="listHeader" style="padding:10px 16px; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" id="showAllChk" onchange="loadList()"> Show notification/spam senders too
+    </div>
+    <div id="listItems"></div>
+  </div>
   <div id="thread">
     <div id="empty">Select a conversation</div>
   </div>
@@ -248,8 +279,9 @@ async function api(path, opts) {
 
 async function loadList() {
   try {
-    const convos = await api('/inbox/api/conversations');
-    const list = document.getElementById('list');
+    const showAll = document.getElementById('showAllChk').checked;
+    const convos = await api('/inbox/api/conversations' + (showAll ? '?all=1' : ''));
+    const list = document.getElementById('listItems');
     list.innerHTML = '';
     convos.forEach(c => {
       const div = document.createElement('div');

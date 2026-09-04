@@ -71,6 +71,29 @@ from email.mime.text import MIMEText
 from email.header import decode_header
 from email.utils import parseaddr
 
+# Senders whose mail is never a genuine lead reply — automated
+# notifications, digests, job-invite platforms, and no-reply addresses.
+# Module-level (not just used inside run_email_poll_once) so inbox.py can
+# reuse the exact same list to hide this traffic from the inbox view too.
+NOREPLY_LOCAL_PARTS = (
+    "noreply", "no-reply", "donotreply", "do-not-reply",
+    "notification", "notifications", "mailer-daemon",
+    "postmaster", "messages", "message", "alert", "alerts",
+    "update", "updates", "notify",
+)
+# Domains of consumer platforms / job boards / tooling whose automated
+# mail (likes, comments, notifications, digests, job invites, security
+# alerts) can land in any inbox and is never a genuine business lead
+# reply for this agency.
+KNOWN_NOTIFICATION_DOMAINS = (
+    "youtube.com", "facebookmail.com", "facebook.com",
+    "instagram.com", "linkedin.com", "twitter.com", "x.com",
+    "google.com", "accounts.google.com", "github.com",
+    "slack.com", "notion.so", "calendly.com", "render.com",
+    "naukri.com", "jobhai.com", "brevo.com", "zapier.com",
+    "whapi.cloud",
+)
+
 GMAIL_SMTP_HOST = "smtp.gmail.com"
 GMAIL_SMTP_PORT = 587
 GMAIL_IMAP_HOST = "imap.gmail.com"
@@ -418,21 +441,6 @@ def fetch_new_replies(gmail_address: str, gmail_app_password: str,
                 # a local-part-only check missed the second one, so this now
                 # also checks the domain).
                 local_part = sender_addr.split("@", 1)[0]
-                NOREPLY_LOCAL_PARTS = (
-                    "noreply", "no-reply", "donotreply", "do-not-reply",
-                    "notification", "notifications", "mailer-daemon",
-                    "postmaster", "messages", "message", "alert", "alerts",
-                    "update", "updates", "notify",
-                )
-                # Domains of consumer platforms whose automated mail (likes,
-                # comments, notifications, digests) can land in any inbox
-                # and is never going to be a genuine business lead reply.
-                KNOWN_NOTIFICATION_DOMAINS = (
-                    "youtube.com", "facebookmail.com", "facebook.com",
-                    "instagram.com", "linkedin.com", "twitter.com", "x.com",
-                    "google.com", "accounts.google.com", "github.com",
-                    "slack.com", "notion.so", "calendly.com", "render.com",
-                )
                 is_noreply_local = local_part in NOREPLY_LOCAL_PARTS
                 is_known_notification_domain = any(
                     domain == d or domain.endswith("." + d) for d in KNOWN_NOTIFICATION_DOMAINS
