@@ -280,10 +280,16 @@ This email was sent by Vortex AI. If you weren't expecting this, you can safely 
 
 
 def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
-                subject: str, body: str) -> tuple[bool, str]:
+                subject: str, body: str) -> tuple[bool, str, str]:
     """Sends one email via Brevo's HTTPS transactional API. Returns
-    (ok, detail) — same shape as send_proposals.py's send_message(), so
-    callers can handle both channels identically.
+    (ok, detail, message_id). message_id is Brevo's own id for this send
+    (from the API response's "messageId" field) when ok is True, else "".
+    It's what any later delivery/bounce webhook event arrives keyed on —
+    see db_storage.update_delivery_status() — so callers that want status
+    tracking must save it (db_storage.mark_contacted(..., message_id=...)).
+    The (ok, detail) pair keeps the exact same meaning as before; this
+    only adds a third element, so existing 2-tuple unpacking at call
+    sites needs updating to 3-tuple, not the other way round.
 
     The "from" address is SEND_FROM_EMAIL if set (a domain address you've
     verified + authenticated in Brevo — better deliverability than a free
@@ -309,10 +315,10 @@ def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
     covers 300 emails/day, comfortably above this pipeline's volume.
     """
     if not BREVO_API_KEY:
-        return False, "BREVO_API_KEY not set — cannot send (see email_sender.py module notes)"
+        return False, "BREVO_API_KEY not set — cannot send (see email_sender.py module notes)", ""
     from_addr = SEND_FROM_EMAIL or gmail_address
     if not from_addr:
-        return False, "Neither SEND_FROM_EMAIL nor GMAIL_ADDRESS set — no from-address available"
+        return False, "Neither SEND_FROM_EMAIL nor GMAIL_ADDRESS set — no from-address available", ""
     payload = {
         "sender": {"email": from_addr, "name": "Vortex AI"},
         "to": [{"email": to_addr}],
@@ -338,20 +344,27 @@ def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
             timeout=20,
         )
         if resp.status_code in (200, 201):
-            return True, f"accepted by Brevo for delivery to {to_addr}"
-        return False, f"Brevo API returned {resp.status_code}: {resp.text[:300]}"
+            message_id = ""
+            try:
+                message_id = resp.json().get("messageId", "")
+            except Exception:
+                pass  # Unexpected response shape — send still succeeded, just no id to track status by.
+            return True, f"accepted by Brevo for delivery to {to_addr}", message_id
+        return False, f"Brevo API returned {resp.status_code}: {resp.text[:300]}", ""
     except Exception as e:
-        return False, str(e)
+        return False, str(e), ""
 
 
 def send_email_with_fallback_guesses(gmail_address: str, gmail_app_password: str,
-                                       domain: str, subject: str, body: str) -> tuple[bool, str]:
+                                       domain: str, subject: str, body: str) -> tuple[bool, str, str]:
     """Tries each guessed address in turn, stopping at the first one
     Brevo's API accepts. Note this does NOT confirm delivery or that the
-    address is real — see module docstring."""
+    address is real — see module docstring. Returns (ok, detail,
+    message_id) — same third element as send_email() above, from
+    whichever guess actually succeeded."""
     candidates = guess_email_addresses(domain)
     if not candidates:
-        return False, "no domain on file, or domain has no mail-capable DNS — nothing to guess"
+        return False, "no domain on file, or domain has no mail-capable DNS — nothing to guess", ""
 
     last_detail = ""
     any_attempted = False
@@ -361,13 +374,13 @@ def send_email_with_fallback_guesses(gmail_address: str, gmail_app_password: str
             last_detail = f"{addr}: skipped — AbstractAPI confirmed undeliverable"
             continue
         any_attempted = True
-        ok, detail = send_email(gmail_address, gmail_app_password, addr, subject, body)
+        ok, detail, message_id = send_email(gmail_address, gmail_app_password, addr, subject, body)
         if ok:
-            return True, f"sent to guessed address {addr} ({detail})"
+            return True, f"sent to guessed address {addr} ({detail})", message_id
         last_detail = f"{addr}: {detail}"
     if not any_attempted:
-        return False, f"all guessed addresses pre-filtered as undeliverable — {last_detail}"
-    return False, f"all guessed addresses failed — last error: {last_detail}"
+        return False, f"all guessed addresses pre-filtered as undeliverable — {last_detail}", ""
+    return False, f"all guessed addresses failed — last error: {last_detail}", ""
 
 
 def _decode_str(raw) -> str:

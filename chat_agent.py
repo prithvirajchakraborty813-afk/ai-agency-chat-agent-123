@@ -84,6 +84,7 @@ import google.auth.transport.requests
 from flask import Flask, request, jsonify
 
 import order_contract
+import brevo_webhook
 import db_storage
 import email_sender
 import inbox
@@ -177,6 +178,7 @@ _state_lock = threading.Lock()
 
 app = Flask(__name__)
 app.register_blueprint(inbox.inbox_bp)
+app.register_blueprint(brevo_webhook.brevo_webhook_bp)
 
 
 def _startup_checks() -> None:
@@ -303,7 +305,7 @@ def send_whatsapp(to_phone: str, text: str) -> bool:
         if not OWNER_EMAIL:
             print("[error] OWNER_NOTIFY_CHANNEL=email but OWNER_EMAIL is not set — cannot alert owner.", file=sys.stderr)
             return False
-        ok, detail = email_sender.send_email(
+        ok, detail, _msg_id = email_sender.send_email(
             GMAIL_ADDRESS, GMAIL_APP_PASSWORD, OWNER_EMAIL, "Agency update", text
         )
         if not ok:
@@ -316,7 +318,7 @@ def send_whatsapp(to_phone: str, text: str) -> bool:
         if not reply_to:
             print(f"[error] No email_address stored on conversation {to_phone} — cannot send.", file=sys.stderr)
             return False
-        ok, detail = email_sender.send_email(
+        ok, detail, _msg_id = email_sender.send_email(
             GMAIL_ADDRESS, GMAIL_APP_PASSWORD, reply_to, EMAIL_REPLY_SUBJECT, text
         )
         if not ok:

@@ -143,6 +143,7 @@ def api_list_sent():
     for row in contacted:
         key = row["phone"]
         first_sent_at = row.get("first_sent_at")
+        status_updated_at = row.get("status_updated_at")
         out.append({
             "id": key,
             "name": row.get("name") or "",
@@ -151,6 +152,12 @@ def api_list_sent():
             "first_sent_at": first_sent_at.isoformat() if hasattr(first_sent_at, "isoformat") else str(first_sent_at or ""),
             "replied": key in convos,
             "is_notification": _is_notification_convo(key),
+            # delivery_status is None until the first Brevo webhook event
+            # arrives for this send (WhatsApp sends have no message_id, so
+            # theirs stays None permanently — Brevo tracking is email-only).
+            "delivery_status": row.get("delivery_status"),
+            "delivery_detail": row.get("delivery_detail") or "",
+            "status_updated_at": status_updated_at.isoformat() if hasattr(status_updated_at, "isoformat") else (str(status_updated_at) if status_updated_at else ""),
         })
     return jsonify(out)
 
@@ -413,6 +420,7 @@ async function loadSentList() {
         <div class="preview">${escapeHtml(s.id)}</div>
         <div class="meta">
           ${s.replied ? '<span class="badge" style="background:#223a2c; color:#8fd19e;">replied</span>' : '<span class="badge">no reply yet</span>'}
+          ${deliveryBadge(s.delivery_status)}
           ${s.is_notification ? '<span class="badge" style="background:#3a2c22; color:#ffb877;">notification domain</span>' : ''}
           <span>sent ${when}</span>
         </div>`;
@@ -436,6 +444,12 @@ function openSentDetail(id) {
          <div class="who">You sent · ${when}</div>${escapeHtml(s.message_sent)}
        </div>`
     : `<div style="color:var(--muted); padding:20px;">No saved copy of this message — it was sent before message text started being stored. New sends will show up here.</div>`;
+  const statusWhen = s.status_updated_at ? new Date(s.status_updated_at).toLocaleString() : '';
+  const statusLine = `<div style="padding:8px 0;">
+      ${deliveryBadge(s.delivery_status)}
+      ${s.delivery_detail ? `<span style="color:var(--muted); margin-left:8px;">${escapeHtml(s.delivery_detail)}</span>` : ''}
+      ${statusWhen ? `<span style="color:var(--muted); margin-left:8px;">as of ${statusWhen}</span>` : ''}
+    </div>`;
   thread.innerHTML = `
     <div id="threadHeader">
       <div>
@@ -445,6 +459,7 @@ function openSentDetail(id) {
       ${s.replied ? `<button id="resumeBtn" class="show" onclick="switchTabSilent('inbox'); openConvo('${escapeJs(s.id)}')">Open conversation</button>` : ''}
     </div>
     <div id="messages" style="flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:10px;">
+      ${statusLine}
       ${msg}
     </div>`;
 }
@@ -521,6 +536,28 @@ function escapeHtml(s) {
   return (s || '').toString().replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
 function escapeJs(s) { return (s || '').replace(/'/g, "\\'"); }
+
+// Maps a Brevo event name to a badge color + short label. Unknown/future
+// event names (Brevo occasionally adds new ones) fall through to a
+// neutral badge showing the raw event string rather than being hidden,
+// so nothing silently disappears from the UI when Brevo's event set
+// changes.
+function deliveryBadge(status) {
+  if (!status) return '<span class="badge">no event yet</span>';
+  const map = {
+    delivered:   ['#223a2c', '#8fd19e', 'delivered'],
+    opened:      ['#223a3a', '#8fd1d1', 'opened'],
+    soft_bounce: ['#3a3322', '#e0c46f', 'deferred/soft bounce'],
+    deferred:    ['#3a3322', '#e0c46f', 'deferred'],
+    hard_bounce: ['#3a2222', '#e08f8f', 'hard bounce'],
+    blocked:     ['#3a2222', '#e08f8f', 'blocked'],
+    spam:        ['#3a2222', '#e08f8f', 'marked spam'],
+    invalid_email: ['#3a2222', '#e08f8f', 'invalid address'],
+    unsubscribed: ['#3a2c22', '#ffb877', 'unsubscribed'],
+  };
+  const [bg, fg, label] = map[status] || ['#2c2c2c', '#bbb', status];
+  return `<span class="badge" style="background:${bg}; color:${fg};">${escapeHtml(label)}</span>`;
+}
 
 // Refresh the list every 15s so replies that come in while you're
 // browsing show up without a manual reload.

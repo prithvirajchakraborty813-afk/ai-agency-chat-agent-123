@@ -122,6 +122,32 @@ def init_db() -> None:
         cur.execute("""
             ALTER TABLE contacted_leads ADD COLUMN IF NOT EXISTS message_sent TEXT
         """)
+        # Added for Brevo delivery-status tracking (webhook events).
+        # message_id is Brevo's own id for the send (returned in the API
+        # response at send time) — it's the join key every later webhook
+        # event arrives keyed on, so a lookup index is added below.
+        # delivery_status starts NULL ("sent, no event yet") and is
+        # overwritten by each webhook event as it arrives; delivery_detail
+        # holds the raw event's free-text reason (e.g. a bounce reason)
+        # when Brevo provides one. status_updated_at is set only by the
+        # webhook handler, not at initial send, so it doubles as "was this
+        # ever updated at all" for the UI.
+        cur.execute("""
+            ALTER TABLE contacted_leads ADD COLUMN IF NOT EXISTS message_id TEXT
+        """)
+        cur.execute("""
+            ALTER TABLE contacted_leads ADD COLUMN IF NOT EXISTS delivery_status TEXT
+        """)
+        cur.execute("""
+            ALTER TABLE contacted_leads ADD COLUMN IF NOT EXISTS delivery_detail TEXT
+        """)
+        cur.execute("""
+            ALTER TABLE contacted_leads ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_contacted_leads_message_id
+            ON contacted_leads (message_id)
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS processed_emails (
                 message_id TEXT PRIMARY KEY,
@@ -239,7 +265,8 @@ def load_all_contacted_leads() -> list:
     for why)."""
     with _cursor() as cur:
         cur.execute(
-            "SELECT phone, name, detail, message_sent, first_sent_at "
+            "SELECT phone, name, detail, message_sent, message_id, "
+            "delivery_status, delivery_detail, status_updated_at, first_sent_at "
             "FROM contacted_leads ORDER BY first_sent_at DESC"
         )
         return [dict(row) for row in cur.fetchall()]
@@ -251,21 +278,58 @@ def is_contacted(phone: str) -> bool:
         return cur.fetchone() is not None
 
 
-def mark_contacted(phone: str, name: str = "", detail: str = "", message_sent: str = "") -> None:
+def mark_contacted(phone: str, name: str = "", detail: str = "", message_sent: str = "",
+                    message_id: str = "") -> None:
     """`detail` stays the send-RESULT string (kept for backward
     compatibility with every existing call site and any log-reading code
-    that expects it). `message_sent` is new — the actual proposal text
-    that went out, so it can be displayed later (see the column comment
-    in init_db() above for why this didn't exist before)."""
+    that expects it). `message_sent` is the actual proposal text that
+    went out. `message_id` is new — Brevo's id for this specific send,
+    only present for email sends (Brevo assigns it; WhatsApp sends via
+    WAHA have no equivalent and pass ""). It's the join key
+    update_delivery_status() below uses to attach a later webhook event
+    back to this row, so store it whenever email_sender.send_email()
+    returns one."""
     with _cursor(commit=True) as cur:
         cur.execute(
             """
-            INSERT INTO contacted_leads (phone, name, detail, message_sent)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO contacted_leads (phone, name, detail, message_sent, message_id)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (phone) DO NOTHING
             """,
-            (phone, name, detail, message_sent),
+            (phone, name, detail, message_sent, message_id or None),
         )
+
+
+# ---------------------------------------------------------------------------
+# Delivery status — updated by Brevo webhook events (delivered, deferred,
+# soft_bounce, hard_bounce, blocked, opened, spam, etc). WHY THIS EXISTS:
+# send_email()'s return value only ever meant "Brevo's API accepted this
+# for sending" — it says nothing about what actually happened to the email
+# afterward. Brevo pushes that as separate async webhook events, keyed on
+# the message_id from the original send, which is why mark_contacted()
+# above needs to store that id up front.
+# ---------------------------------------------------------------------------
+
+def update_delivery_status(message_id: str, status: str, detail: str = "") -> bool:
+    """Looks up the contacted_leads row by message_id and overwrites its
+    delivery_status/delivery_detail/status_updated_at. Returns True if a
+    matching row was found and updated, False otherwise (e.g. a webhook
+    event for a message_id this app never sent/recorded — logged by the
+    caller, not an error here). Each new event simply overwrites the
+    previous status rather than appending a history — Brevo's own
+    dashboard is the place for a full event timeline if that's ever
+    needed; this column is meant to answer "what's the current state"
+    at a glance in the inbox UI."""
+    with _cursor(commit=True) as cur:
+        cur.execute(
+            """
+            UPDATE contacted_leads
+            SET delivery_status = %s, delivery_detail = %s, status_updated_at = now()
+            WHERE message_id = %s
+            """,
+            (status, detail, message_id),
+        )
+        return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------

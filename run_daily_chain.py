@@ -124,7 +124,7 @@ def _notify_owner_email(message: str) -> None:
     if not OWNER_EMAIL:
         print(f"[owner notify skipped — OWNER_EMAIL not set] {message}", file=sys.stderr)
         return
-    ok, detail = email_sender.send_email(
+    ok, detail, _msg_id = email_sender.send_email(
         GMAIL_ADDRESS, GMAIL_APP_PASSWORD, OWNER_EMAIL,
         subject="Daily lead pipeline alert", body=message,
     )

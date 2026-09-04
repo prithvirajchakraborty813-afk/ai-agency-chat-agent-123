@@ -238,17 +238,17 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
         if not sent_ok and can_try_email:
             subject = f"AI customer-engagement assistant for {name}" if name else "AI customer-engagement assistant"
             if real_email:
-                ok, detail = email_sender.send_email(
+                ok, detail, message_id = email_sender.send_email(
                     gmail_address, gmail_app_password, real_email, subject, proposal_text)
                 if ok:
                     detail = f"sent to real address {real_email} ({detail})"
             else:
-                ok, detail = email_sender.send_email_with_fallback_guesses(
+                ok, detail, message_id = email_sender.send_email_with_fallback_guesses(
                     gmail_address, gmail_app_password, domain, subject, proposal_text)
             if ok:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> sent (email fallback), {detail}")
                 log_writer.writerow({"name": name, "phone": e_key, "channel": "email", "status": "sent", "detail": detail})
-                db_storage.mark_contacted(e_key, name, detail, message_sent=proposal_text)
+                db_storage.mark_contacted(e_key, name, detail, message_sent=proposal_text, message_id=message_id)
                 sent_ok = True
             else:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> email fallback FAILED: {detail}", file=sys.stderr)
