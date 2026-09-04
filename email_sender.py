@@ -91,7 +91,7 @@ KNOWN_NOTIFICATION_DOMAINS = (
     "google.com", "accounts.google.com", "github.com",
     "slack.com", "notion.so", "calendly.com", "render.com",
     "naukri.com", "jobhai.com", "brevo.com", "zapier.com",
-    "whapi.cloud",
+    "whapi.cloud", "cloudflare.com", "descript.com",
 )
 
 GMAIL_SMTP_HOST = "smtp.gmail.com"

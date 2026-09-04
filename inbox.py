@@ -96,17 +96,30 @@ def _preview(history: list) -> str:
 @inbox_bp.route("/inbox/api/conversations", methods=["GET"])
 @require_key
 def api_list_conversations():
+    # Default view: only conversations that trace back to a real send from
+    # your own outbound campaign (send_proposals.py is the only place that
+    # calls db_storage.mark_contacted — WhatsApp numbers AND "email:<addr>"
+    # keys both land in the same contacted_leads table). Anything not in
+    # that set was never a lead you emailed: it's inbound-only, which in
+    # practice has meant notification junk or your own manual tests, not
+    # real prospects. ?all=1 shows everything, unfiltered.
     show_all = request.args.get("all") == "1"
+    contacted = db_storage.load_all_contacted_phones()
     convos = db_storage.load_all_conversations()
     out = []
     for convo_id, convo in convos.items():
-        if not show_all and _is_notification_convo(convo_id):
-            continue
+        is_campaign_lead = convo_id in contacted
+        if not show_all:
+            if _is_notification_convo(convo_id):
+                continue
+            if not is_campaign_lead:
+                continue
         history = convo.get("history", [])
         out.append({
             "id": convo_id,
             "stage": convo.get("stage", ""),
             "human_takeover": bool(convo.get("human_takeover", False)),
+            "is_campaign_lead": is_campaign_lead,
             "last_message": _preview(history),
             "last_at": history[-1]["at"] if history else convo.get("created_at", ""),
             "message_count": len(history),
@@ -244,7 +257,7 @@ INBOX_HTML = r"""<!doctype html>
 <div id="app">
   <div id="list">
     <div id="listHeader" style="padding:10px 16px; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px;">
-      <input type="checkbox" id="showAllChk" onchange="loadList()"> Show notification/spam senders too
+      <input type="checkbox" id="showAllChk" onchange="loadList()"> Show all inbound (incl. non-campaign / spam)
     </div>
     <div id="listItems"></div>
   </div>
@@ -293,6 +306,7 @@ async function loadList() {
         <div class="preview">${escapeHtml(c.last_message)}</div>
         <div class="meta">
           <span class="badge">${escapeHtml(c.stage)}</span>
+          ${c.is_campaign_lead ? '' : '<span class="badge" style="background:#3a2c22; color:#ffb877;">not from campaign</span>'}
           ${c.human_takeover ? '<span class="badge paused">paused — you have it</span>' : ''}
           <span>${when}</span>
         </div>`;
