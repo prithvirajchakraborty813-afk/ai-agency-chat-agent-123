@@ -147,6 +147,7 @@ def api_list_sent():
             "id": key,
             "name": row.get("name") or "",
             "detail": row.get("detail") or "",
+            "message_sent": row.get("message_sent") or "",
             "first_sent_at": first_sent_at.isoformat() if hasattr(first_sent_at, "isoformat") else str(first_sent_at or ""),
             "replied": key in convos,
             "is_notification": _is_notification_convo(key),
@@ -398,27 +399,54 @@ async function loadList() {
 async function loadSentList() {
   try {
     const sent = await api('/inbox/api/sent');
+    lastSentList = sent;
     const list = document.getElementById('listItems');
     list.innerHTML = '';
     sent.forEach(s => {
       const div = document.createElement('div');
       div.className = 'item' + (s.id === activeId ? ' active' : '');
-      // Only wire up a click if this lead actually has a conversation to open.
-      if (s.replied) { div.onclick = () => { switchTabSilent('inbox'); openConvo(s.id); }; }
-      else { div.style.cursor = 'default'; }
+      div.onclick = () => openSentDetail(s.id);
       const when = s.first_sent_at ? new Date(s.first_sent_at).toLocaleString() : '';
       const label = s.name || s.detail || s.id;
       div.innerHTML = `
         <div class="id">${escapeHtml(label)}</div>
         <div class="preview">${escapeHtml(s.id)}</div>
         <div class="meta">
-          ${s.replied ? '<span class="badge" style="background:#223a2c; color:#8fd19e;">replied — click to open</span>' : '<span class="badge">no reply yet</span>'}
+          ${s.replied ? '<span class="badge" style="background:#223a2c; color:#8fd19e;">replied</span>' : '<span class="badge">no reply yet</span>'}
           ${s.is_notification ? '<span class="badge" style="background:#3a2c22; color:#ffb877;">notification domain</span>' : ''}
           <span>sent ${when}</span>
         </div>`;
       list.appendChild(div);
     });
   } catch (e) { /* unauthorized already handled */ }
+}
+
+let lastSentList = [];
+
+function openSentDetail(id) {
+  activeId = id;
+  loadSentList();
+  const s = lastSentList.find(x => x.id === id);
+  if (!s) return;
+  const thread = document.getElementById('thread');
+  const when = s.first_sent_at ? new Date(s.first_sent_at).toLocaleString() : '';
+  const label = s.name || s.detail || s.id;
+  const msg = s.message_sent
+    ? `<div class="bubble agent" style="align-self:flex-start; max-width:80%;">
+         <div class="who">You sent · ${when}</div>${escapeHtml(s.message_sent)}
+       </div>`
+    : `<div style="color:var(--muted); padding:20px;">No saved copy of this message — it was sent before message text started being stored. New sends will show up here.</div>`;
+  thread.innerHTML = `
+    <div id="threadHeader">
+      <div>
+        <h2>${escapeHtml(label)}</h2>
+        <div class="sub">${escapeHtml(s.id)} · sent ${when}</div>
+      </div>
+      ${s.replied ? `<button id="resumeBtn" class="show" onclick="switchTabSilent('inbox'); openConvo('${escapeJs(s.id)}')">Open conversation</button>` : ''}
+    </div>
+    <div id="messages" style="flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:10px;">
+      ${msg}
+    </div>`;
 }
 
 // Switches the tab UI back to Inbox without re-triggering loadSentList,

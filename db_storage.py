@@ -109,6 +109,19 @@ def init_db() -> None:
                 first_sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        # Added after contacted_leads already existed in production —
+        # ALTER TABLE ADD COLUMN IF NOT EXISTS is idempotent, same as the
+        # CREATE TABLE IF NOT EXISTS pattern above, safe to run every
+        # startup. WHY: `detail` already held the send-RESULT string (e.g.
+        # "sent to guessed address info@x.com (accepted by Brevo...)"),
+        # never the actual proposal text sent — so there was no way to
+        # answer "what did I actually say to this lead" after the fact,
+        # since proposals.csv (the only place the real text lived) is
+        # regenerated fresh and overwritten on every GitHub Actions run.
+        # This column is the permanent, queryable copy of that text.
+        cur.execute("""
+            ALTER TABLE contacted_leads ADD COLUMN IF NOT EXISTS message_sent TEXT
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS processed_emails (
                 message_id TEXT PRIMARY KEY,
@@ -217,16 +230,17 @@ def load_all_contacted_phones() -> set:
 
 
 def load_all_contacted_leads() -> list:
-    """Full rows (phone/key, name, detail, first_sent_at), newest first —
-    unlike load_all_contacted_phones() which only returns the bare key set
-    for dedup checks. Used by inbox.py's 'Sent' tab so the owner can see
-    every lead ever contacted, independent of whether they ever replied
-    (contacted_leads and conversations are separate tables — see inbox.py
-    module docstring for why)."""
+    """Full rows (phone/key, name, detail, message_sent, first_sent_at),
+    newest first — unlike load_all_contacted_phones() which only returns
+    the bare key set for dedup checks. Used by inbox.py's 'Sent' tab so
+    the owner can see every lead ever contacted AND what was actually
+    sent to them, independent of whether they ever replied (contacted_leads
+    and conversations are separate tables — see inbox.py module docstring
+    for why)."""
     with _cursor() as cur:
         cur.execute(
-            "SELECT phone, name, detail, first_sent_at FROM contacted_leads "
-            "ORDER BY first_sent_at DESC"
+            "SELECT phone, name, detail, message_sent, first_sent_at "
+            "FROM contacted_leads ORDER BY first_sent_at DESC"
         )
         return [dict(row) for row in cur.fetchall()]
 
@@ -237,15 +251,20 @@ def is_contacted(phone: str) -> bool:
         return cur.fetchone() is not None
 
 
-def mark_contacted(phone: str, name: str = "", detail: str = "") -> None:
+def mark_contacted(phone: str, name: str = "", detail: str = "", message_sent: str = "") -> None:
+    """`detail` stays the send-RESULT string (kept for backward
+    compatibility with every existing call site and any log-reading code
+    that expects it). `message_sent` is new — the actual proposal text
+    that went out, so it can be displayed later (see the column comment
+    in init_db() above for why this didn't exist before)."""
     with _cursor(commit=True) as cur:
         cur.execute(
             """
-            INSERT INTO contacted_leads (phone, name, detail)
-            VALUES (%s, %s, %s)
+            INSERT INTO contacted_leads (phone, name, detail, message_sent)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (phone) DO NOTHING
             """,
-            (phone, name, detail),
+            (phone, name, detail, message_sent),
         )
 
 

@@ -229,7 +229,7 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
             if ok:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> sent (WhatsApp) to {to}")
                 log_writer.writerow({"name": name, "phone": to, "channel": "whatsapp", "status": "sent", "detail": detail})
-                db_storage.mark_contacted(to, name, detail)
+                db_storage.mark_contacted(to, name, detail, message_sent=proposal_text)
                 sent_ok = True
             else:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> WhatsApp FAILED: {detail}", file=sys.stderr)
@@ -248,7 +248,7 @@ def run(in_csv: str, waha_url: str, session: str, api_key: str, min_delay: float
             if ok:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> sent (email fallback), {detail}")
                 log_writer.writerow({"name": name, "phone": e_key, "channel": "email", "status": "sent", "detail": detail})
-                db_storage.mark_contacted(e_key, name, detail)
+                db_storage.mark_contacted(e_key, name, detail, message_sent=proposal_text)
                 sent_ok = True
             else:
                 print(f"  [{i}/{len(rows)}] {name:40s} -> email fallback FAILED: {detail}", file=sys.stderr)
