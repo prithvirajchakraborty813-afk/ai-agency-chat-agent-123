@@ -77,12 +77,6 @@ def receive_brevo_event():
     # fallback chain rather than a single .get().
     detail = payload.get("reason") or payload.get("tag") or ""
 
-    # TEMP DEBUG — remove once delivery-status matching is confirmed
-    # working. Prints exactly what message_id this webhook event carries,
-    # so it can be compared byte-for-byte against the
-    # "[email_sender debug] Extracted message_id" line from the send side.
-    print(f"[brevo-webhook debug] Incoming message_id: {message_id!r} (event={event})")
-
     if not message_id or not event:
         # Malformed or unrecognized payload shape — log and 200 back so
         # Brevo doesn't retry indefinitely on something that will never

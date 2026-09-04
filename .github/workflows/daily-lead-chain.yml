@@ -2,9 +2,25 @@ name: Daily Lead Chain
 
 on:
   schedule:
-    # Cron times are UTC. IST is UTC+5:30. Example: 20:30 IST = 15:00 UTC.
-    # Adjust the line below to your actual fixed time, then convert to UTC.
-    - cron: "0 15 * * *"
+    # Changed from once/day to hourly — GitHub Actions cron doesn't
+    # guarantee exact timing (a few minutes of jitter is normal,
+    # especially at the top of the hour when many repos' cron jobs fire
+    # at once), but this fires roughly every hour, 24x/day.
+    #
+    # WHY THIS IS SAFE AT THIS VOLUME: each run re-checks
+    # contacted_leads / dedup before spending any Gemini/Vertex AI call,
+    # so most of a given hour's "new" leads from gemini_maps_finder.py's
+    # fixed city list will already be deduped out — the marginal cost of
+    # an extra run is mostly the finder step's own API calls, not
+    # wasted qualify/proposal calls on leads you've already contacted.
+    # Still worth watching two things as this scales: (1) Vertex AI's
+    # per-project-per-minute quota — that's a hard rate limit, not a
+    # cost, and running hourly makes hitting it during a burst more
+    # likely than daily did; (2) Brevo's free-tier daily send cap
+    # (300/day) — sending in smaller hourly batches instead of one
+    # daily batch is actually GOOD for deliverability (fewer flagged as
+    # bulk/spam), but the daily total still needs to stay under budget.
+    - cron: "0 * * * *"
   workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab too
 
 jobs:

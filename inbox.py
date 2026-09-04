@@ -545,6 +545,7 @@ function escapeJs(s) { return (s || '').replace(/'/g, "\\'"); }
 function deliveryBadge(status) {
   if (!status) return '<span class="badge">no event yet</span>';
   const map = {
+    request:     ['#2c2c3a', '#a8a8d1', 'sending…'],
     delivered:   ['#223a2c', '#8fd19e', 'delivered'],
     opened:      ['#223a3a', '#8fd1d1', 'opened'],
     soft_bounce: ['#3a3322', '#e0c46f', 'deferred/soft bounce'],
