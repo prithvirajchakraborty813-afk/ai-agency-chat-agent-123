@@ -86,6 +86,40 @@ def _is_notification_convo(convo_id: str) -> bool:
     )
 
 
+def _campaign_match_sets(contacted: set) -> tuple:
+    """Split contacted_leads keys into exact email addresses, domain-only
+    entries, and phone numbers. send_proposals.py records a domain-only
+    key (e.g. "email:somecompany.com") whenever a lead has no captured
+    real email address — common for Maps-sourced leads. When that lead
+    actually replies, chat_agent.py keys the conversation by their full
+    sender address (e.g. "email:owner@somecompany.com"), which would
+    never exact-match the domain-only contacted key. This split lets
+    _is_campaign_lead treat a reply from any address at a domain-only
+    contacted domain as a genuine campaign lead too."""
+    exact, domains, phones = set(), set(), set()
+    for key in contacted:
+        if key.startswith("email:"):
+            addr = key[len("email:"):]
+            if "@" in addr:
+                exact.add(key)
+            else:
+                domains.add(addr)
+        else:
+            phones.add(key)
+    return exact, domains, phones
+
+
+def _is_campaign_lead(convo_id: str, exact: set, domains: set, phones: set) -> bool:
+    if convo_id in exact or convo_id in phones:
+        return True
+    if convo_id.startswith("email:"):
+        addr = convo_id[len("email:"):]
+        if "@" in addr:
+            return addr.split("@", 1)[1] in domains
+        return addr in domains
+    return False
+
+
 def _preview(history: list) -> str:
     if not history:
         return "(no messages yet)"
@@ -105,10 +139,11 @@ def api_list_conversations():
     # real prospects. ?all=1 shows everything, unfiltered.
     show_all = request.args.get("all") == "1"
     contacted = db_storage.load_all_contacted_phones()
+    exact, domains, phones = _campaign_match_sets(contacted)
     convos = db_storage.load_all_conversations()
     out = []
     for convo_id, convo in convos.items():
-        is_campaign_lead = convo_id in contacted
+        is_campaign_lead = _is_campaign_lead(convo_id, exact, domains, phones)
         if not show_all:
             if _is_notification_convo(convo_id):
                 continue
