@@ -216,6 +216,21 @@ def load_all_contacted_phones() -> set:
         return {row["phone"] for row in cur.fetchall()}
 
 
+def load_all_contacted_leads() -> list:
+    """Full rows (phone/key, name, detail, first_sent_at), newest first —
+    unlike load_all_contacted_phones() which only returns the bare key set
+    for dedup checks. Used by inbox.py's 'Sent' tab so the owner can see
+    every lead ever contacted, independent of whether they ever replied
+    (contacted_leads and conversations are separate tables — see inbox.py
+    module docstring for why)."""
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT phone, name, detail, first_sent_at FROM contacted_leads "
+            "ORDER BY first_sent_at DESC"
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
 def is_contacted(phone: str) -> bool:
     with _cursor() as cur:
         cur.execute("SELECT 1 FROM contacted_leads WHERE phone = %s", (phone,))

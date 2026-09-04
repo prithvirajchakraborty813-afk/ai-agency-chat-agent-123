@@ -127,6 +127,33 @@ def _preview(history: list) -> str:
     return (text[:90] + "…") if len(text) > 90 else text
 
 
+@inbox_bp.route("/inbox/api/sent", methods=["GET"])
+@require_key
+def api_list_sent():
+    """Every lead ever contacted (outbound), independent of whether they
+    replied — the 'Sent' tab. Reads contacted_leads directly, since that's
+    populated the moment send_proposals.py sends, unlike conversations
+    (only populated on an inbound reply — see module docstring). Each row
+    is flagged replied=True if a matching conversations row exists, so the
+    owner can tell at a glance who's gone quiet vs who's actually talked
+    back."""
+    contacted = db_storage.load_all_contacted_leads()
+    convos = db_storage.load_all_conversations()
+    out = []
+    for row in contacted:
+        key = row["phone"]
+        first_sent_at = row.get("first_sent_at")
+        out.append({
+            "id": key,
+            "name": row.get("name") or "",
+            "detail": row.get("detail") or "",
+            "first_sent_at": first_sent_at.isoformat() if hasattr(first_sent_at, "isoformat") else str(first_sent_at or ""),
+            "replied": key in convos,
+            "is_notification": _is_notification_convo(key),
+        })
+    return jsonify(out)
+
+
 @inbox_bp.route("/inbox/api/conversations", methods=["GET"])
 @require_key
 def api_list_conversations():
@@ -291,6 +318,10 @@ INBOX_HTML = r"""<!doctype html>
 
 <div id="app">
   <div id="list">
+    <div id="tabBar" style="display:flex; border-bottom:1px solid var(--border);">
+      <div id="tabInbox" class="tabBtn active" onclick="switchTab('inbox')" style="flex:1; text-align:center; padding:10px; cursor:pointer; font-size:12.5px; border-bottom:2px solid var(--accent);">Inbox</div>
+      <div id="tabSent" class="tabBtn" onclick="switchTab('sent')" style="flex:1; text-align:center; padding:10px; cursor:pointer; font-size:12.5px; border-bottom:2px solid transparent; color:var(--muted);">Sent</div>
+    </div>
     <div id="listHeader" style="padding:10px 16px; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px;">
       <input type="checkbox" id="showAllChk" onchange="loadList()"> Show all inbound (incl. non-campaign / spam)
     </div>
@@ -304,6 +335,7 @@ INBOX_HTML = r"""<!doctype html>
 <script>
 let KEY = localStorage.getItem('inbox_key') || '';
 let activeId = null;
+let activeTab = 'inbox';
 let pollTimer = null;
 
 function saveKey() {
@@ -325,7 +357,20 @@ async function api(path, opts) {
   return res.json();
 }
 
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById('tabInbox').classList.toggle('active', tab === 'inbox');
+  document.getElementById('tabSent').classList.toggle('active', tab === 'sent');
+  document.getElementById('tabInbox').style.borderBottomColor = tab === 'inbox' ? 'var(--accent)' : 'transparent';
+  document.getElementById('tabSent').style.borderBottomColor = tab === 'sent' ? 'var(--accent)' : 'transparent';
+  document.getElementById('tabInbox').style.color = tab === 'inbox' ? 'var(--text)' : 'var(--muted)';
+  document.getElementById('tabSent').style.color = tab === 'sent' ? 'var(--text)' : 'var(--muted)';
+  document.getElementById('listHeader').style.display = tab === 'inbox' ? 'flex' : 'none';
+  loadList();
+}
+
 async function loadList() {
+  if (activeTab === 'sent') { return loadSentList(); }
   try {
     const showAll = document.getElementById('showAllChk').checked;
     const convos = await api('/inbox/api/conversations' + (showAll ? '?all=1' : ''));
@@ -348,6 +393,45 @@ async function loadList() {
       list.appendChild(div);
     });
   } catch (e) { /* unauthorized already handled */ }
+}
+
+async function loadSentList() {
+  try {
+    const sent = await api('/inbox/api/sent');
+    const list = document.getElementById('listItems');
+    list.innerHTML = '';
+    sent.forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'item' + (s.id === activeId ? ' active' : '');
+      // Only wire up a click if this lead actually has a conversation to open.
+      if (s.replied) { div.onclick = () => { switchTabSilent('inbox'); openConvo(s.id); }; }
+      else { div.style.cursor = 'default'; }
+      const when = s.first_sent_at ? new Date(s.first_sent_at).toLocaleString() : '';
+      const label = s.name || s.detail || s.id;
+      div.innerHTML = `
+        <div class="id">${escapeHtml(label)}</div>
+        <div class="preview">${escapeHtml(s.id)}</div>
+        <div class="meta">
+          ${s.replied ? '<span class="badge" style="background:#223a2c; color:#8fd19e;">replied — click to open</span>' : '<span class="badge">no reply yet</span>'}
+          ${s.is_notification ? '<span class="badge" style="background:#3a2c22; color:#ffb877;">notification domain</span>' : ''}
+          <span>sent ${when}</span>
+        </div>`;
+      list.appendChild(div);
+    });
+  } catch (e) { /* unauthorized already handled */ }
+}
+
+// Switches the tab UI back to Inbox without re-triggering loadSentList,
+// used right before opening a conversation from a "replied" Sent row.
+function switchTabSilent(tab) {
+  activeTab = tab;
+  document.getElementById('tabInbox').classList.toggle('active', tab === 'inbox');
+  document.getElementById('tabSent').classList.toggle('active', tab === 'sent');
+  document.getElementById('tabInbox').style.borderBottomColor = tab === 'inbox' ? 'var(--accent)' : 'transparent';
+  document.getElementById('tabSent').style.borderBottomColor = tab === 'sent' ? 'var(--accent)' : 'transparent';
+  document.getElementById('tabInbox').style.color = tab === 'inbox' ? 'var(--text)' : 'var(--muted)';
+  document.getElementById('tabSent').style.color = tab === 'sent' ? 'var(--text)' : 'var(--muted)';
+  document.getElementById('listHeader').style.display = tab === 'inbox' ? 'flex' : 'none';
 }
 
 async function openConvo(id) {
