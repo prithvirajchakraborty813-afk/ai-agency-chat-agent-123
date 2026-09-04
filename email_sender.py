@@ -349,6 +349,13 @@ def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
                 message_id = resp.json().get("messageId", "")
             except Exception:
                 pass  # Unexpected response shape — send still succeeded, just no id to track status by.
+            # TEMP DEBUG — remove once delivery-status matching is confirmed
+            # working. Prints the raw Brevo response body and exactly what
+            # got extracted as message_id, so a mismatch between this and
+            # the webhook's "message-id" field is visible in Render logs
+            # instead of only showing up as a silent lookup miss later.
+            print(f"[email_sender debug] Brevo response body: {resp.text[:500]}")
+            print(f"[email_sender debug] Extracted message_id: {message_id!r}")
             return True, f"accepted by Brevo for delivery to {to_addr}", message_id
         return False, f"Brevo API returned {resp.status_code}: {resp.text[:300]}", ""
     except Exception as e:

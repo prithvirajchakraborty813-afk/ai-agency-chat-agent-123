@@ -288,13 +288,30 @@ def mark_contacted(phone: str, name: str = "", detail: str = "", message_sent: s
     WAHA have no equivalent and pass ""). It's the join key
     update_delivery_status() below uses to attach a later webhook event
     back to this row, so store it whenever email_sender.send_email()
-    returns one."""
+    returns one.
+
+    WHY ON CONFLICT UPDATES message_id (not DO NOTHING): send_proposals.py
+    only calls this after already checking is_contacted()/dedup, so a
+    genuine re-send to an already-contacted lead shouldn't normally
+    happen — but if it does (a manual re-run, a dedup-key edge case, a
+    lead re-added after a rejection), the ORIGINAL bug here was that a
+    plain "DO NOTHING" silently discarded the new message_id, leaving
+    delivery-status tracking permanently broken for that row: every
+    subsequent Brevo webhook event for the new send would look up a
+    message_id nothing in the table matched, forever. Updating
+    message_id/detail/message_sent on conflict (while leaving
+    first_sent_at and delivery_status/delivery_detail alone, since those
+    describe the ORIGINAL send/its outcome, not this one) fixes that
+    without needing a second row per lead."""
     with _cursor(commit=True) as cur:
         cur.execute(
             """
             INSERT INTO contacted_leads (phone, name, detail, message_sent, message_id)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (phone) DO NOTHING
+            ON CONFLICT (phone) DO UPDATE SET
+                message_id = EXCLUDED.message_id,
+                detail = EXCLUDED.detail,
+                message_sent = EXCLUDED.message_sent
             """,
             (phone, name, detail, message_sent, message_id or None),
         )
