@@ -28,16 +28,122 @@ SETUP (no PAN, free):
        code, NOT your normal Gmail password. This is used for IMAP
        polling of replies (fetch_new_replies below) — NOT for sending;
        see next step.
-    2. Sending goes through Brevo's HTTPS API, not Gmail SMTP directly —
+    2. Sending goes through HTTPS provider APIs, not Gmail SMTP directly —
        Render's free tier blocks outbound SMTP ports (25/465/587), which
        silently broke every send before this was caught (see the
-       BREVO_API_URL note further down for the full story). Sign up free
-       at app.brevo.com, verify a sender, then get an API key from
-       Settings -> SMTP & API -> API Keys.
+       BREVO_API_URL note further down for the full story). Set up one or
+       more of the providers below; you only need one working, more is
+       optional redundancy/extra daily volume (see MULTI-PROVIDER note).
     3. Set as env vars (or pass via CLI flags):
            GMAIL_ADDRESS=youraddress@gmail.com
            GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx
            BREVO_API_KEY=xkeysib-xxxxxxxxxxxxxxxx
+
+MULTI-PROVIDER SENDING (added later — Brevo was the only option before):
+    send_email() now tries a list of providers in priority order and
+    falls through to the next one if a provider is unreachable, rejects
+    the send, or has already hit its own daily free-tier cap today
+    (tracked via db_storage.get_provider_sends_today so this pipeline
+    self-limits BEFORE a real bounce/suspension, not just after). This
+    buys two things: (1) more combined daily volume than any single free
+    tier alone, and (2) the pipeline keeps working if one provider has an
+    outage or blocks the account. All of them are free-forever tiers, no
+    credit card, similar few-minutes signup to Brevo above. Add ANY
+    subset — every one is independently optional; unset ones are just
+    skipped.
+
+    Brevo    (existing, 300/day)  — already set up per step 2 above.
+    Mailgun  (100/day)            — signup.mailgun.com free plan, verify a
+                                     sending domain (Settings -> Sending ->
+                                     Domains), get the API key from
+                                     Settings -> API Keys.
+                                       MAILGUN_API_KEY=xxxxxxxxxxxxxxxx
+                                       MAILGUN_DOMAIN=mg.yourdomain.com
+    Resend   (3,000/mo, 100/day)  — resend.com signup, verify a domain
+                                     under Domains, create a key under
+                                     API Keys.
+                                       RESEND_API_KEY=re_xxxxxxxxxxxxxxxx
+    SMTP2GO  (1,000/mo)           — smtp2go.com free signup, verify a
+                                     sender under Settings -> Sender
+                                     Domains, create a key under Settings
+                                     -> API Keys (grant "Email Send"
+                                     permission).
+                                       SMTP2GO_API_KEY=api-XXXXXXXXXXXXXXXX
+    Elastic Email (100/day)       — elasticemail.com free signup, verify a
+                                     sender under Settings -> Domains, get
+                                     the key from Settings -> API.
+                                       ELASTICEMAIL_API_KEY=xxxxxxxxxxxxxxxx
+    MailerSend    (3,000/mo,
+                   100/day trial) — mailersend.com free signup, verify a
+                                     domain under Domains, create a token
+                                     under Integrations -> API tokens
+                                     (needs "Email" full access).
+                                       MAILERSEND_API_KEY=mlsn.xxxxxxxxxxxx
+    SendGrid (100/day,
+              60-DAY TRIAL ONLY —   — signup.sendgrid.com. As of 2026 the
+              see note)              old permanent-free plan is gone: new
+                                     accounts get 100/day for 60 days, then
+                                     must move to a paid plan (~$19.95/mo)
+                                     to keep sending. Set up if you want a
+                                     temporary boost, but don't rely on it
+                                     staying free — verify a Single Sender
+                                     (Settings -> Sender Authentication, no
+                                     domain DNS needed), then create a key
+                                     under Settings -> API Keys ("Mail
+                                     Send" access).
+                                       SENDGRID_API_KEY=SG.xxxxxxxxxxxxxxxx
+    Mailjet  (200/day, 6,000/mo,
+              free forever)        — mailjet.com free signup, verify a
+                                     sender under Senders & Domains, get
+                                     both keys from Account Settings ->
+                                     API Key Management.
+                                       MAILJET_API_KEY=xxxxxxxxxxxxxxxx
+                                       MAILJET_SECRET_KEY=xxxxxxxxxxxxxxxx
+    Mailtrap (1,000/mo)            — mailtrap.io free signup, under Email
+                                     Sending verify a sending domain, then
+                                     create a token under Sending Domains
+                                     -> API Tokens.
+                                       MAILTRAP_API_TOKEN=xxxxxxxxxxxxxxxx
+    Postmark (100/mo,
+              free forever)        — postmarkapp.com free signup, verify a
+                                     Sender Signature (single address, no
+                                     domain DNS needed — Sender Signatures
+                                     -> Add) or a full domain for higher
+                                     trust, then get the Server API Token
+                                     from the server's API Tokens tab. Low
+                                     monthly cap (100/mo, not /day) — best
+                                     used as one more fallback, not a
+                                     primary volume source.
+                                       POSTMARK_SERVER_TOKEN=xxxxxxxxxxxxxxxx
+    Zoho ZeptoMail (transactional-
+                    only, free
+                    credit trial)  — zeptomail.zoho.com signup, verify a
+                                     sending domain under Setup -> Domains,
+                                     create a Mail Agent, then get the
+                                     token from Setup -> Mail Agents ->
+                                     [agent] -> API. ZeptoMail runs on a
+                                     credit system after the initial free
+                                     trial credits run out (not a fixed
+                                     daily/monthly cap like the others) —
+                                     check current pricing on their site
+                                     before relying on it.
+                                       ZEPTOMAIL_TOKEN=xxxxxxxxxxxxxxxx
+
+    Priority order defaults to Brevo -> Mailjet -> Elastic Email -> Mailgun
+    -> Resend -> MailerSend -> SendGrid -> SMTP2GO -> Mailtrap -> Postmark
+    -> ZeptoMail (roughly highest-to-lowest free cap; the last two are
+    added at the end since their free tiers are the smallest/least
+    reliable of the set — see their notes above). Override with:
+           EMAIL_PROVIDER_ORDER=resend,brevo,mailgun,smtp2go
+    (comma-separated provider names from PROVIDERS below; unknown/unset
+    ones are ignored, so a typo just falls back to the default order
+    rather than erroring).
+
+    Adding a further provider later: add one entry to the PROVIDERS list
+    below (name, required env vars, daily_limit, a `send` function with
+    the same (from_name, from_addr, reply_to, to_addr, subject, text,
+    html) -> (ok, detail, message_id) signature as the others) — nothing
+    else needs to change, send_email() picks it up automatically.
 
 REPLIES: fetch_new_replies() below polls the inbox over IMAP and
 returns unread messages as (sender_address, body) pairs, marking them
@@ -112,6 +218,18 @@ GMAIL_IMAP_PORT = 993
 # directly — only outbound sending moved.
 BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
+MAILGUN_API_KEY = os.environ.get("MAILGUN_API_KEY", "")
+MAILGUN_DOMAIN = os.environ.get("MAILGUN_DOMAIN", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+SMTP2GO_API_KEY = os.environ.get("SMTP2GO_API_KEY", "")
+ELASTICEMAIL_API_KEY = os.environ.get("ELASTICEMAIL_API_KEY", "")
+MAILERSEND_API_KEY = os.environ.get("MAILERSEND_API_KEY", "")
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+MAILJET_API_KEY = os.environ.get("MAILJET_API_KEY", "")
+MAILJET_SECRET_KEY = os.environ.get("MAILJET_SECRET_KEY", "")
+MAILTRAP_API_TOKEN = os.environ.get("MAILTRAP_API_TOKEN", "")
+POSTMARK_SERVER_TOKEN = os.environ.get("POSTMARK_SERVER_TOKEN", "")
+ZEPTOMAIL_TOKEN = os.environ.get("ZEPTOMAIL_TOKEN", "")
 # Optional — the address replies are sent FROM. Separate from GMAIL_ADDRESS
 # on purpose: GMAIL_ADDRESS still does the IMAP polling (reading incoming
 # replies) and is a real Gmail inbox; SEND_FROM_EMAIL is for a properly
@@ -279,59 +397,25 @@ This email was sent by Vortex AI. If you weren't expecting this, you can safely 
 </body></html>"""
 
 
-def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
-                subject: str, body: str) -> tuple[bool, str, str]:
-    """Sends one email via Brevo's HTTPS transactional API. Returns
-    (ok, detail, message_id). message_id is Brevo's own id for this send
-    (from the API response's "messageId" field) when ok is True, else "".
-    It's what any later delivery/bounce webhook event arrives keyed on —
-    see db_storage.update_delivery_status() — so callers that want status
-    tracking must save it (db_storage.mark_contacted(..., message_id=...)).
-    The (ok, detail) pair keeps the exact same meaning as before; this
-    only adds a third element, so existing 2-tuple unpacking at call
-    sites needs updating to 3-tuple, not the other way round.
-
-    The "from" address is SEND_FROM_EMAIL if set (a domain address you've
-    verified + authenticated in Brevo — better deliverability than a free
-    Gmail address), otherwise falls back to gmail_address so this works
-    even before SEND_FROM_EMAIL is configured. gmail_address/
-    gmail_app_password are kept as required parameters for backward
-    compatibility with every existing caller; gmail_app_password itself
-    is unused here (still needed elsewhere in this module for IMAP
-    polling, which is unaffected by any of this).
-
-    Every send sets Reply-To back to gmail_address (your Gmail — the one
-    fetch_new_replies() above actually polls). This matters specifically
-    because SEND_FROM_EMAIL points at a domain mailbox (Zoho, in this
-    project's case) whose free plan has no IMAP/forwarding — mail sent
-    there would be invisible to this bot forever with no error, the same
-    silent-loss failure mode as the Gmail read/unread bug this module
-    already fixed once. Reply-To redirects a lead's reply to Gmail at the
-    email-client level (every major client honors it) without needing
-    forwarding, IMAP, or any paid plan on the domain mailbox's end.
-
-    Requires BREVO_API_KEY to be set as an env var — get one free at
-    app.brevo.com (Settings -> SMTP & API -> API Keys). Brevo's free tier
-    covers 300 emails/day, comfortably above this pipeline's volume.
-    """
-    if not BREVO_API_KEY:
-        return False, "BREVO_API_KEY not set — cannot send (see email_sender.py module notes)", ""
-    from_addr = SEND_FROM_EMAIL or gmail_address
-    if not from_addr:
-        return False, "Neither SEND_FROM_EMAIL nor GMAIL_ADDRESS set — no from-address available", ""
+def _send_via_brevo(from_name: str, from_addr: str, reply_to: str,
+                     to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    """message_id in the return is Brevo's own id for this send (from the
+    API response's "messageId" field) — it's what brevo_webhook.py's
+    delivery/bounce events arrive keyed on (see
+    db_storage.update_delivery_status()), so callers that want status
+    tracking must save it. Other providers below return "" for message_id
+    since there's no matching webhook wired up for them yet — status
+    tracking currently only works for sends that went out via Brevo."""
     payload = {
-        "sender": {"email": from_addr, "name": "Vortex AI"},
+        "sender": {"email": from_addr, "name": from_name},
         "to": [{"email": to_addr}],
         "subject": subject,
-        "textContent": body,
-        "htmlContent": _plain_text_to_html(body),
+        "textContent": text,
+        "htmlContent": html,
         "headers": {"Content-Type": "text/html; charset=utf-8"},
     }
-    # Only set Reply-To when it differs from the from-address — if
-    # SEND_FROM_EMAIL isn't configured, from_addr IS gmail_address already,
-    # and an identical Reply-To is redundant (harmless, but noise).
-    if gmail_address and gmail_address != from_addr:
-        payload["replyTo"] = {"email": gmail_address}
+    if reply_to and reply_to != from_addr:
+        payload["replyTo"] = {"email": reply_to}
     try:
         resp = requests.post(
             BREVO_API_URL,
@@ -348,11 +432,463 @@ def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
             try:
                 message_id = resp.json().get("messageId", "")
             except Exception:
-                pass  # Unexpected response shape — send still succeeded, just no id to track status by.
+                pass
             return True, f"accepted by Brevo for delivery to {to_addr}", message_id
         return False, f"Brevo API returned {resp.status_code}: {resp.text[:300]}", ""
     except Exception as e:
         return False, str(e), ""
+
+
+def _send_via_mailgun(from_name: str, from_addr: str, reply_to: str,
+                       to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    if not MAILGUN_DOMAIN:
+        return False, "MAILGUN_DOMAIN not set", ""
+    data = {
+        "from": f"{from_name} <{from_addr}>",
+        "to": to_addr,
+        "subject": subject,
+        "text": text,
+        "html": html,
+    }
+    if reply_to and reply_to != from_addr:
+        data["h:Reply-To"] = reply_to
+    try:
+        resp = requests.post(
+            f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
+            auth=("api", MAILGUN_API_KEY),
+            data=data,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            message_id = ""
+            try:
+                message_id = resp.json().get("id", "")
+            except Exception:
+                pass
+            return True, f"accepted by Mailgun for delivery to {to_addr}", message_id
+        return False, f"Mailgun API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_resend(from_name: str, from_addr: str, reply_to: str,
+                      to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    payload = {
+        "from": f"{from_name} <{from_addr}>",
+        "to": [to_addr],
+        "subject": subject,
+        "text": text,
+        "html": html,
+    }
+    if reply_to and reply_to != from_addr:
+        payload["reply_to"] = reply_to
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            message_id = ""
+            try:
+                message_id = resp.json().get("id", "")
+            except Exception:
+                pass
+            return True, f"accepted by Resend for delivery to {to_addr}", message_id
+        return False, f"Resend API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_smtp2go(from_name: str, from_addr: str, reply_to: str,
+                       to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    payload = {
+        "api_key": SMTP2GO_API_KEY,
+        "to": [f"{to_addr}"],
+        "sender": f"{from_name} <{from_addr}>",
+        "subject": subject,
+        "text_body": text,
+        "html_body": html,
+    }
+    if reply_to and reply_to != from_addr:
+        payload["custom_headers"] = [{"header": "Reply-To", "value": reply_to}]
+    try:
+        resp = requests.post(
+            "https://api.smtp2go.com/v3/email/send",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            succeeded = ((data.get("data") or {}).get("succeeded", 0))
+            if succeeded:
+                message_id = ""
+                try:
+                    email_ids = (data.get("data") or {}).get("email_id", [])
+                    message_id = email_ids[0] if email_ids else ""
+                except Exception:
+                    pass
+                return True, f"accepted by SMTP2GO for delivery to {to_addr}", message_id
+            return False, f"SMTP2GO reported 0 succeeded: {resp.text[:300]}", ""
+        return False, f"SMTP2GO API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_elasticemail(from_name: str, from_addr: str, reply_to: str,
+                            to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    payload = {
+        "Recipients": [{"Email": to_addr}],
+        "Content": {
+            "From": f"{from_name} <{from_addr}>",
+            "Subject": subject,
+            "Body": [
+                {"ContentType": "HTML", "Content": html},
+                {"ContentType": "PlainText", "Content": text},
+            ],
+        },
+    }
+    if reply_to and reply_to != from_addr:
+        payload["Content"]["ReplyTo"] = reply_to
+    try:
+        resp = requests.post(
+            "https://api.elasticemail.com/v4/emails",
+            headers={
+                "X-ElasticEmail-ApiKey": ELASTICEMAIL_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            message_id = ""
+            try:
+                message_id = resp.json().get("MessageID") or resp.json().get("TransactionID", "")
+            except Exception:
+                pass
+            return True, f"accepted by Elastic Email for delivery to {to_addr}", message_id
+        return False, f"Elastic Email API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_mailersend(from_name: str, from_addr: str, reply_to: str,
+                          to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    payload = {
+        "from": {"email": from_addr, "name": from_name},
+        "to": [{"email": to_addr}],
+        "subject": subject,
+        "text": text,
+        "html": html,
+    }
+    if reply_to and reply_to != from_addr:
+        payload["reply_to"] = {"email": reply_to}
+    try:
+        resp = requests.post(
+            "https://api.mailersend.com/v1/email",
+            headers={
+                "Authorization": f"Bearer {MAILERSEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201, 202):
+            # MailerSend doesn't return a body on success — the message id
+            # comes back in the X-Message-Id response header instead.
+            message_id = resp.headers.get("X-Message-Id", "")
+            return True, f"accepted by MailerSend for delivery to {to_addr}", message_id
+        return False, f"MailerSend API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_sendgrid(from_name: str, from_addr: str, reply_to: str,
+                        to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    payload = {
+        "personalizations": [{"to": [{"email": to_addr}]}],
+        "from": {"email": from_addr, "name": from_name},
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": text},
+            {"type": "text/html", "value": html},
+        ],
+    }
+    if reply_to and reply_to != from_addr:
+        payload["reply_to"] = {"email": reply_to}
+    try:
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201, 202):
+            # SendGrid also returns no JSON body on success — message id
+            # comes back in the X-Message-Id response header instead,
+            # same pattern as MailerSend above.
+            message_id = resp.headers.get("X-Message-Id", "")
+            return True, f"accepted by SendGrid for delivery to {to_addr}", message_id
+        return False, f"SendGrid API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_mailjet(from_name: str, from_addr: str, reply_to: str,
+                       to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    message = {
+        "From": {"Email": from_addr, "Name": from_name},
+        "To": [{"Email": to_addr}],
+        "Subject": subject,
+        "TextPart": text,
+        "HTMLPart": html,
+    }
+    if reply_to and reply_to != from_addr:
+        message["ReplyTo"] = {"Email": reply_to}
+    try:
+        resp = requests.post(
+            "https://api.mailjet.com/v3.1/send",
+            auth=(MAILJET_API_KEY, MAILJET_SECRET_KEY),
+            json={"Messages": [message]},
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            message_id = ""
+            try:
+                data = resp.json()
+                msgs = data.get("Messages", [])
+                if msgs and msgs[0].get("Status") == "success":
+                    to_list = msgs[0].get("To", [])
+                    message_id = str(to_list[0].get("MessageID", "")) if to_list else ""
+                elif msgs and msgs[0].get("Status") != "success":
+                    errs = msgs[0].get("Errors", [])
+                    err_text = "; ".join(e.get("ErrorMessage", "") for e in errs) or "unknown Mailjet error"
+                    return False, f"Mailjet rejected the send: {err_text}", ""
+            except Exception:
+                pass
+            return True, f"accepted by Mailjet for delivery to {to_addr}", message_id
+        return False, f"Mailjet API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+# Priority order + per-provider daily_limit (the FREE-TIER cap, used only
+# to self-limit BEFORE a real bounce — see MULTI-PROVIDER note in the
+# module docstring). env_required lists the env var(s) that must be set
+# for this provider to be attempted at all; missing any of them skips it
+# silently (not an error — that's the "every provider is optional" design).
+def _send_via_mailtrap(from_name: str, from_addr: str, reply_to: str,
+                        to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    payload = {
+        "from": {"email": from_addr, "name": from_name},
+        "to": [{"email": to_addr}],
+        "subject": subject,
+        "text": text,
+        "html": html,
+    }
+    if reply_to and reply_to != from_addr:
+        payload["reply_to"] = {"email": reply_to}
+    try:
+        resp = requests.post(
+            "https://send.api.mailtrap.io/api/send",
+            headers={
+                "Authorization": f"Bearer {MAILTRAP_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            message_id = ""
+            try:
+                ids = resp.json().get("message_ids", [])
+                message_id = ids[0] if ids else ""
+            except Exception:
+                pass
+            return True, f"accepted by Mailtrap for delivery to {to_addr}", message_id
+        return False, f"Mailtrap API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_postmark(from_name: str, from_addr: str, reply_to: str,
+                        to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    """Postmark's free tier is 100/MONTH (not /day like most others here)
+    — deliberately placed last in PROVIDERS below so it's only used once
+    every higher-cap provider is exhausted for the day."""
+    payload = {
+        "From": f"{from_name} <{from_addr}>" if from_name else from_addr,
+        "To": to_addr,
+        "Subject": subject,
+        "TextBody": text,
+        "HtmlBody": html,
+        "MessageStream": "outbound",
+    }
+    if reply_to and reply_to != from_addr:
+        payload["ReplyTo"] = reply_to
+    try:
+        resp = requests.post(
+            "https://api.postmarkapp.com/email",
+            headers={
+                "X-Postmark-Server-Token": POSTMARK_SERVER_TOKEN,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            data = resp.json() if resp.text else {}
+            if data.get("ErrorCode", 0) != 0:
+                return False, f"Postmark rejected the send: {data.get('Message', resp.text[:300])}", ""
+            return True, f"accepted by Postmark for delivery to {to_addr}", data.get("MessageID", "")
+        return False, f"Postmark API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+def _send_via_zeptomail(from_name: str, from_addr: str, reply_to: str,
+                         to_addr: str, subject: str, text: str, html: str) -> tuple[bool, str, str]:
+    """ZeptoMail runs on a credit system after its initial free trial
+    credits, not a fixed recurring daily/monthly cap like the others in
+    this file — daily_limit below is a conservative placeholder, not a
+    number ZeptoMail itself publishes. Check current pricing/credits on
+    your own dashboard before relying on this for real volume."""
+    payload = {
+        "from": {"address": from_addr, "name": from_name},
+        "to": [{"email_address": {"address": to_addr}}],
+        "subject": subject,
+        "htmlbody": html,
+        "textbody": text,
+    }
+    if reply_to and reply_to != from_addr:
+        payload["reply_to"] = [{"address": reply_to}]
+    try:
+        resp = requests.post(
+            "https://api.zeptomail.com/v1.1/email",
+            headers={
+                "Authorization": ZEPTOMAIL_TOKEN,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code in (200, 201):
+            data = resp.json() if resp.text else {}
+            message_id = ""
+            try:
+                message_id = data.get("data", [{}])[0].get("additional_info", {}).get("message_id", "")
+            except Exception:
+                pass
+            return True, f"accepted by ZeptoMail for delivery to {to_addr}", message_id
+        return False, f"ZeptoMail API returned {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return False, str(e), ""
+
+
+PROVIDERS = [
+    {"name": "brevo", "env_required": ["BREVO_API_KEY"], "daily_limit": 300, "send": _send_via_brevo},
+    {"name": "mailjet", "env_required": ["MAILJET_API_KEY", "MAILJET_SECRET_KEY"], "daily_limit": 200, "send": _send_via_mailjet},
+    {"name": "elasticemail", "env_required": ["ELASTICEMAIL_API_KEY"], "daily_limit": 100, "send": _send_via_elasticemail},
+    {"name": "mailgun", "env_required": ["MAILGUN_API_KEY", "MAILGUN_DOMAIN"], "daily_limit": 100, "send": _send_via_mailgun},
+    {"name": "resend", "env_required": ["RESEND_API_KEY"], "daily_limit": 100, "send": _send_via_resend},
+    {"name": "mailersend", "env_required": ["MAILERSEND_API_KEY"], "daily_limit": 100, "send": _send_via_mailersend},
+    {"name": "sendgrid", "env_required": ["SENDGRID_API_KEY"], "daily_limit": 100, "send": _send_via_sendgrid},
+    {"name": "smtp2go", "env_required": ["SMTP2GO_API_KEY"], "daily_limit": 33, "send": _send_via_smtp2go},
+    {"name": "mailtrap", "env_required": ["MAILTRAP_API_TOKEN"], "daily_limit": 33, "send": _send_via_mailtrap},
+    {"name": "postmark", "env_required": ["POSTMARK_SERVER_TOKEN"], "daily_limit": 3, "send": _send_via_postmark},
+    {"name": "zeptomail", "env_required": ["ZEPTOMAIL_TOKEN"], "daily_limit": 20, "send": _send_via_zeptomail},
+]
+
+
+def _ordered_providers() -> list[dict]:
+    """Applies EMAIL_PROVIDER_ORDER if set (comma-separated provider
+    names), otherwise the PROVIDERS list's own default order. Unknown
+    names in the override are ignored rather than erroring, so a typo
+    just falls back to default order instead of breaking sends."""
+    order_env = os.environ.get("EMAIL_PROVIDER_ORDER", "").strip()
+    if not order_env:
+        return PROVIDERS
+    by_name = {p["name"]: p for p in PROVIDERS}
+    ordered = [by_name[n.strip()] for n in order_env.split(",") if n.strip() in by_name]
+    # Anything in PROVIDERS but not mentioned in the override still gets
+    # tried, just after everything the override named explicitly — an
+    # override is a preference, not meant to silently disable providers.
+    remaining = [p for p in PROVIDERS if p not in ordered]
+    return ordered + remaining
+
+
+def send_email(gmail_address: str, gmail_app_password: str, to_addr: str,
+                subject: str, body: str) -> tuple[bool, str, str]:
+    """Tries each configured provider in priority order (see PROVIDERS /
+    EMAIL_PROVIDER_ORDER above), returning on the first one that accepts
+    the send. Returns (ok, detail, message_id) — detail says which
+    provider succeeded (or, on total failure, what every attempted
+    provider said). message_id is only meaningful for delivery-status
+    tracking when the send went via Brevo (see _send_via_brevo).
+
+    A provider is skipped, not attempted, when: its required env var(s)
+    aren't set (not configured at all), or db_storage reports it's
+    already sent >= its daily_limit today (self-imposed cap to avoid
+    hitting the real free-tier limit and risking a bounce or account
+    flag — see db_storage.get_provider_sends_today). If db_storage isn't
+    reachable, the count check fails open (returns 0) so this never
+    blocks a send the provider itself would have accepted.
+
+    gmail_address/gmail_app_password are kept as required parameters for
+    backward compatibility with every existing caller; gmail_app_password
+    itself is unused here (still needed elsewhere in this module for IMAP
+    polling, unaffected by any of this). The "from" address for every
+    provider is SEND_FROM_EMAIL if set, else gmail_address. Reply-To is
+    always set back to gmail_address (your Gmail — the one
+    fetch_new_replies() above actually polls) when it differs from the
+    from-address, for the same reason as before: SEND_FROM_EMAIL may
+    point at a mailbox with no IMAP/forwarding, so replies would be
+    invisible to this bot without Reply-To redirecting them to Gmail.
+    """
+    from_addr = SEND_FROM_EMAIL or gmail_address
+    if not from_addr:
+        return False, "Neither SEND_FROM_EMAIL nor GMAIL_ADDRESS set — no from-address available", ""
+
+    html = _plain_text_to_html(body)
+    attempts: list[str] = []
+    any_configured = False
+
+    try:
+        import db_storage
+    except Exception:
+        db_storage = None  # count-check below degrades to "always try" if unavailable
+
+    for provider in _ordered_providers():
+        if not all(os.environ.get(v) for v in provider["env_required"]):
+            continue  # not configured — silently skip, this is expected/normal
+        any_configured = True
+
+        if db_storage is not None:
+            sent_today = db_storage.get_provider_sends_today(provider["name"])
+            if sent_today >= provider["daily_limit"]:
+                attempts.append(f"{provider['name']}: skipped — already at today's self-imposed cap ({sent_today}/{provider['daily_limit']})")
+                continue
+
+        ok, detail, message_id = provider["send"]("Vortex AI", from_addr, gmail_address, to_addr, subject, body, html)
+        if ok:
+            if db_storage is not None:
+                db_storage.record_provider_send(provider["name"])
+            return True, f"[{provider['name']}] {detail}", message_id
+        attempts.append(f"{provider['name']}: {detail}")
+
+    if not any_configured:
+        return False, "No email provider configured — set at least one of BREVO_API_KEY, MAILJET_API_KEY+MAILJET_SECRET_KEY, MAILGUN_API_KEY+MAILGUN_DOMAIN, RESEND_API_KEY, SMTP2GO_API_KEY, ELASTICEMAIL_API_KEY, MAILERSEND_API_KEY, SENDGRID_API_KEY, MAILTRAP_API_TOKEN, POSTMARK_SERVER_TOKEN, ZEPTOMAIL_TOKEN (see email_sender.py module notes)", ""
+    return False, "All configured providers failed — " + "; ".join(attempts), ""
 
 
 def send_email_with_fallback_guesses(gmail_address: str, gmail_app_password: str,

@@ -155,6 +155,25 @@ def init_db() -> None:
                 processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        # Added for multi-provider email sending (email_sender.py). One row
+        # per successful send, per provider. Lets send_email() count "how
+        # many has provider X sent today" and skip to the next provider in
+        # the priority order BEFORE hitting a free-tier daily cap and
+        # bouncing, rather than only reacting after a 4xx/limit error comes
+        # back. Deliberately just a log of individual sends (not a running
+        # counter column) — a log is trivial to query "since midnight UTC"
+        # from and never needs a separate daily-reset job.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS provider_sends (
+                id SERIAL PRIMARY KEY,
+                provider TEXT NOT NULL,
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_provider_sends_provider_sent_at
+            ON provider_sends (provider, sent_at)
+        """)
 
 
 # ---------------------------------------------------------------------------
@@ -383,3 +402,42 @@ def mark_email_processed(message_id: str, sender_addr: str = "") -> None:
             """,
             (message_id, sender_addr),
         )
+
+
+# ---------------------------------------------------------------------------
+# Provider send counts — see provider_sends table comment above. Used by
+# email_sender.py's multi-provider rotation to check remaining daily budget
+# before attempting a send, and to log one after a send succeeds.
+# ---------------------------------------------------------------------------
+
+def get_provider_sends_today(provider: str) -> int:
+    """Count of successful sends logged for `provider` since midnight UTC.
+    Returns 0 (not an error) if the table/DB is unreachable, so a DB hiccup
+    degrades to 'assume budget available, try the send anyway' rather than
+    blocking every provider — same fail-open philosophy as the rest of this
+    module's optional checks."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS n FROM provider_sends
+                WHERE provider = %s AND sent_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+                """,
+                (provider,),
+            )
+            row = cur.fetchone()
+            return int(row["n"]) if row else 0
+    except Exception:
+        return 0
+
+
+def record_provider_send(provider: str) -> None:
+    """Logs one successful send for `provider`. Best-effort — a failure here
+    should never take down the caller, since the email itself already went
+    out; it would just mean the daily-count check above under-counts until
+    the DB is reachable again."""
+    try:
+        with _cursor(commit=True) as cur:
+            cur.execute("INSERT INTO provider_sends (provider) VALUES (%s)", (provider,))
+    except Exception:
+        pass
