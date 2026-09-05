@@ -85,6 +85,7 @@ from flask import Flask, request, jsonify
 
 import order_contract
 import brevo_webhook
+import mailjet_webhook
 import db_storage
 import email_sender
 import inbox
@@ -179,6 +180,7 @@ _state_lock = threading.Lock()
 app = Flask(__name__)
 app.register_blueprint(inbox.inbox_bp)
 app.register_blueprint(brevo_webhook.brevo_webhook_bp)
+app.register_blueprint(mailjet_webhook.mailjet_webhook_bp)
 
 
 def _startup_checks() -> None:
