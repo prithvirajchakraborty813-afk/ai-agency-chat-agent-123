@@ -368,6 +368,46 @@ def update_delivery_status(message_id: str, status: str, detail: str = "") -> bo
         return cur.rowcount > 0
 
 
+def update_message_id(phone: str, message_id: str) -> bool:
+    """Updates ONLY the message_id column on an existing contacted_leads
+    row (by its phone/identifier key — the same 'email:domain' or
+    'email:sender_addr' convention used everywhere else in this
+    codebase) so a LATER email in an ongoing conversation (e.g. a
+    chat_agent.py reply, not the original send_proposals.py cold
+    outreach) can also have its delivery status tracked via Brevo's
+    webhook.
+
+    WHY THIS IS SEPARATE FROM mark_contacted(): mark_contacted() also
+    overwrites `detail` and `message_sent`, which describe the ORIGINAL
+    cold-outreach message — calling it again for every conversational
+    reply would corrupt that history. This function touches only
+    message_id (the join key update_delivery_status() above uses) plus
+    resetting delivery_status/delivery_detail/status_updated_at to NULL,
+    since the previous status described the OLD message_id, not this
+    new one — leaving it in place would misleadingly label the new
+    message with the old message's outcome.
+
+    Returns True if a matching row was found and updated, False
+    otherwise (e.g. this lead has no contacted_leads row yet — a
+    conversation that started from an inbound reply with no prior
+    cold-outreach send on record; not an error, just nothing to update).
+    A blank message_id is a no-op (returns False without touching the
+    row) since some providers return "" and there's nothing useful to
+    store."""
+    if not message_id:
+        return False
+    with _cursor(commit=True) as cur:
+        cur.execute(
+            """
+            UPDATE contacted_leads
+            SET message_id = %s, delivery_status = NULL, delivery_detail = NULL, status_updated_at = NULL
+            WHERE phone = %s
+            """,
+            (message_id, phone),
+        )
+        return cur.rowcount > 0
+
+
 # ---------------------------------------------------------------------------
 # Processed emails — cross-run record of every inbound email Message-ID the
 # poll-email route has already handled. WHY THIS EXISTS: fetch_new_replies()

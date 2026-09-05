@@ -320,11 +320,20 @@ def send_whatsapp(to_phone: str, text: str) -> bool:
         if not reply_to:
             print(f"[error] No email_address stored on conversation {to_phone} — cannot send.", file=sys.stderr)
             return False
-        ok, detail, _msg_id = email_sender.send_email(
+        ok, detail, msg_id = email_sender.send_email(
             GMAIL_ADDRESS, GMAIL_APP_PASSWORD, reply_to, EMAIL_REPLY_SUBJECT, text
         )
         if not ok:
             print(f"[error] Failed to send email to {reply_to}: {detail}", file=sys.stderr)
+        elif msg_id:
+            # Lets Brevo's later delivery-status webhook event for THIS
+            # reply match back to this lead's row (previously discarded,
+            # meaning every conversational reply's delivery/bounce/open
+            # event showed up as an unmatched "no contacted_leads row
+            # found" in the logs even though the send itself worked
+            # fine) — see db_storage.update_message_id() for why this
+            # is a separate, narrower update than mark_contacted().
+            db_storage.update_message_id(to_phone, msg_id)
         return ok
 
     if not WAHA_BASE_URL:
