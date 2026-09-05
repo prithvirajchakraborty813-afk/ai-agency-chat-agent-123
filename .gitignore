@@ -18,3 +18,13 @@ venv/
 
 # OS
 .DS_Store
+
+# Lead and proposal data - contains real business info and pricing
+qualified.csv
+prospects.csv
+prospects_maps.csv
+prospects_merged.csv
+prospects_clinics_salons.csv
+proposals.csv
+proposals.xlsx
+debug_test.csv
