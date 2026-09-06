@@ -1,6 +1,0 @@
-{
-  "employee_min": 2,
-  "employee_max": 50,
-  "geographies": ["India"],
-  "max_results": 50
-}
